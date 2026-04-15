@@ -33,27 +33,6 @@ pub fn insert_node(conn: &Connection, node: &Node) {
 
 // ── Peers ──
 
-pub fn get_peer(conn: &Connection, node_id: &str) -> Option<Peer> {
-    conn.query_row(
-        "SELECT node_id, display_name, runtime, endpoint, public_key, owner_name, trust_status, last_seen_at, created_at FROM peers WHERE node_id = ?1",
-        params![node_id],
-        |row| {
-            Ok(Peer {
-                node_id: row.get(0)?,
-                display_name: row.get(1)?,
-                runtime: row.get(2)?,
-                endpoint: row.get(3)?,
-                public_key: row.get(4)?,
-                owner_name: row.get(5)?,
-                trust_status: row.get(6)?,
-                last_seen_at: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        },
-    )
-    .ok()
-}
-
 pub fn list_peers(conn: &Connection) -> Vec<Peer> {
     let mut stmt = conn
         .prepare("SELECT node_id, display_name, runtime, endpoint, public_key, owner_name, trust_status, last_seen_at, created_at FROM peers")
@@ -137,43 +116,4 @@ pub fn get_project_path_by_slug(conn: &Connection, slug: &str) -> Option<String>
     )
     .ok()
     .flatten()
-}
-
-// ── Sync State ──
-
-pub fn upsert_sync_state(conn: &Connection, state: &SyncState) {
-    conn.execute(
-        "INSERT INTO sync_state (project_id, peer_node_id, last_sync_at, last_version)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(project_id, peer_node_id) DO UPDATE SET
-           last_sync_at = excluded.last_sync_at,
-           last_version = excluded.last_version",
-        params![
-            state.project_id,
-            state.peer_node_id,
-            state.last_sync_at,
-            state.last_version,
-        ],
-    )
-    .expect("upsert_sync_state failed");
-}
-
-pub fn get_sync_state(
-    conn: &Connection,
-    project_id: &str,
-    peer_node_id: &str,
-) -> Option<SyncState> {
-    conn.query_row(
-        "SELECT project_id, peer_node_id, last_sync_at, last_version FROM sync_state WHERE project_id = ?1 AND peer_node_id = ?2",
-        params![project_id, peer_node_id],
-        |row| {
-            Ok(SyncState {
-                project_id: row.get(0)?,
-                peer_node_id: row.get(1)?,
-                last_sync_at: row.get(2)?,
-                last_version: row.get(3)?,
-            })
-        },
-    )
-    .ok()
 }

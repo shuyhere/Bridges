@@ -10,24 +10,15 @@ pub struct ProjectJson {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchJson {
-    pub poll_interval_secs: u64,
-    pub peers: Vec<String>,
-}
-
 /// Initialize a .bridges workspace inside `project_path`.
 /// Creates directory structure and default files. Never overwrites existing files.
 pub fn init_workspace(project_path: &Path, slug: &str) {
     let bridges_dir = project_path.join(".bridges");
-    let shared_dir = bridges_dir.join("shared");
-    let artifacts_dir = shared_dir.join("artifacts");
-    let peers_dir = bridges_dir.join("peers");
+    let shared_dir = project_path.join(".shared");
 
-    // Create directories
-    for dir in [&bridges_dir, &shared_dir, &artifacts_dir, &peers_dir] {
-        fs::create_dir_all(dir).expect("failed to create workspace directory");
-    }
+    fs::create_dir_all(&bridges_dir).expect("failed to create workspace directory");
+    fs::create_dir_all(shared_dir.join("artifacts"))
+        .expect("failed to create shared workspace directory");
 
     // project.json
     let project_json_path = bridges_dir.join("project.json");
@@ -40,17 +31,6 @@ pub fn init_workspace(project_path: &Path, slug: &str) {
         };
         let json = serde_json::to_string_pretty(&project).unwrap();
         fs::write(&project_json_path, json).expect("failed to write project.json");
-    }
-
-    // watch.json
-    let watch_path = bridges_dir.join("watch.json");
-    if !watch_path.exists() {
-        let watch = WatchJson {
-            poll_interval_secs: 30,
-            peers: vec![],
-        };
-        let json = serde_json::to_string_pretty(&watch).unwrap();
-        fs::write(&watch_path, json).expect("failed to write watch.json");
     }
 
     // Shared markdown files
@@ -91,13 +71,6 @@ fn write_if_missing(path: &Path, content: &str) {
 /// Read project.json from a workspace.
 pub fn read_project_json(project_path: &Path) -> Option<ProjectJson> {
     let path = project_path.join(".bridges").join("project.json");
-    let data = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
-/// Read watch.json from a workspace.
-pub fn read_watch_json(project_path: &Path) -> Option<WatchJson> {
-    let path = project_path.join(".bridges").join("watch.json");
     let data = fs::read_to_string(&path).ok()?;
     serde_json::from_str(&data).ok()
 }

@@ -6,7 +6,7 @@ Created by `bridges create` or `bridges join`:
 
 ```
 your-project/
-├── .shared/                    # Git-synced project state
+├── .shared/                    # Optional shared workspace notes/files
 │   ├── PROJECT.md
 │   ├── TODOS.md
 │   ├── DEBATES.md
@@ -14,14 +14,15 @@ your-project/
 │   ├── PROGRESS.md
 │   ├── CHANGELOG.md
 │   └── artifacts/
-├── .bridges/                     # Local-only Bridges metadata
+├── .bridges/                   # Local-only Bridges metadata
 │   ├── project.json            # Local project metadata
-│   ├── watch.json              # Local watcher config
 │   ├── conversation-memory/    # Local per-peer session memory
 │   └── sync-approval.json      # Present only when risky sync needs approval
-├── .git/
-└── .gitignore
+├── .git/                       # Optional; created on first `bridges sync`
+└── .gitignore                  # Optional; created on first `bridges sync`
 ```
+
+`bridges create` and `bridges join` do **not** require git hosting. The core Bridges network works with project membership, messaging, publish, and session state alone. `bridges sync` is an optional layer for exchanging `.shared/` files.
 
 ## project.json
 
@@ -43,7 +44,7 @@ Do not treat `.bridges/project.json` as the authoritative coordination-server pr
 # Todos
 
 - [ ] Write API spec @kd_bob_main (added by kd_alice_coder, 2026-03-24)
-- [x] Set up project repo @kd_alice_coder (done 2026-03-24)
+- [x] First collaboration checkpoint completed (done 2026-03-24)
 ```
 
 ### DEBATES.md

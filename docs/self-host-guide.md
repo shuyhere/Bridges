@@ -2,7 +2,7 @@
 
 This guide is for beta users who want to run a local or self-hosted Bridges deployment for their own group.
 
-This guide is focused on the Bridges core: coordination service, local daemon, secure transport, runtime bridge, and shared workspace flows.
+This guide is focused on the Bridges core: coordination service, local daemon, secure transport, runtime bridge, and optional shared workspace flows.
 
 The local agent runtime still runs on each user's own machine.
 
@@ -187,6 +187,14 @@ Check membership:
 ```bash
 bridges members --project <PROJECT_ID>
 ```
+
+Optional shared workspace sync:
+
+```bash
+bridges sync --project <PROJECT_ID>
+```
+
+This is optional. Project membership, messaging, broadcast, and publish do not require git-based sync to be configured.
 
 ---
 

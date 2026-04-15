@@ -137,6 +137,14 @@ Verify membership from either machine:
 bridges members --project <PROJECT_ID>
 ```
 
+Optional shared workspace sync:
+
+```bash
+bridges sync --project <PROJECT_ID>
+```
+
+This step is optional. Messaging, debate, broadcast, and publish work without enabling workspace sync.
+
 ---
 
 ## Part 6: Validate messaging

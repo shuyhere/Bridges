@@ -1,7 +1,8 @@
-//! Sync engine — git-based worktree sync via a project remote.
+//! Optional shared-workspace sync for Bridges projects.
 //!
-//! Each project is a real git repo. Sync = git add/commit/push/pull.
-//! Conflicts are handled by git natively.
+//! Bridges core messaging and coordination do not depend on git.
+//! When operators explicitly run `bridges sync`, this module snapshots
+//! and merges managed files under `.shared/` using a local git repo.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -32,8 +33,8 @@ pub fn init_shared(project_dir: &Path) {
     }
 }
 
-/// Initialize a git repo in the project directory with "main" as default branch.
-pub fn git_init(project_dir: &Path) -> Result<(), String> {
+/// Initialize a local repo for optional shared-workspace sync.
+fn git_init(project_dir: &Path) -> Result<(), String> {
     // Ensure directory exists (critical — git -C fails on missing dirs)
     fs::create_dir_all(project_dir)
         .map_err(|e| format!("create dir {}: {}", project_dir.display(), e))?;
@@ -42,7 +43,7 @@ pub fn git_init(project_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Stage and commit .shared/ changes.
+/// Stage and commit managed shared-workspace files.
 pub fn git_commit(project_dir: &Path, message: &str) -> Result<bool, String> {
     ensure_gitignore(project_dir);
     run_git(project_dir, &["add", ".shared/", ".gitignore"])?;
@@ -64,13 +65,32 @@ fn ensure_gitignore(project_dir: &Path) {
     }
 }
 
-/// Push to the configured git remote.
+fn ensure_sync_repo(project_dir: &Path, node_id: &str) -> Result<(), String> {
+    if !project_dir.join(".git").exists() {
+        git_init(project_dir)?;
+    }
+
+    let has_name = run_git(project_dir, &["config", "--local", "--get", "user.name"]).is_ok();
+    if !has_name {
+        run_git(project_dir, &["config", "user.name", node_id])?;
+    }
+
+    let has_email = run_git(project_dir, &["config", "--local", "--get", "user.email"]).is_ok();
+    if !has_email {
+        let email = format!("{}@bridges.local", node_id);
+        run_git(project_dir, &["config", "user.email", &email])?;
+    }
+
+    Ok(())
+}
+
+/// Push managed shared-workspace changes to the configured remote.
 pub fn git_push(project_dir: &Path, branch: &str) -> Result<(), String> {
     run_git_remote(project_dir, &["push", "origin", branch])?;
     Ok(())
 }
 
-/// Pull from the configured git remote and merge.
+/// Pull managed shared-workspace changes from the configured remote and merge.
 pub fn git_pull(
     project_dir: &Path,
     node_id: &str,
@@ -316,13 +336,14 @@ struct SyncApprovalProposal {
     remote_unmanaged_paths: Vec<String>,
 }
 
-/// Full sync: commit local, push, pull, merge.
+/// Full optional shared-workspace sync: commit local managed files, push, pull, merge.
 pub fn sync_project(
     project_dir: &Path,
     node_id: &str,
     approve_unmanaged: bool,
 ) -> Result<SyncResult, String> {
     init_shared(project_dir);
+    ensure_sync_repo(project_dir, node_id)?;
     let mut warnings = Vec::new();
 
     // 1. Commit local changes
@@ -551,6 +572,26 @@ mod tests {
         assert!(dir.join(".shared/TODOS.md").exists());
         assert!(dir.join(".shared/MEMBERS.md").exists());
         assert!(dir.join(".shared/artifacts").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_sync_repo_initializes_git_on_demand() {
+        let dir = std::env::temp_dir().join(format!(
+            "bridges_test_ensure_sync_repo_{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        ensure_sync_repo(&dir, "kd_test").unwrap();
+
+        assert!(dir.join(".git").exists());
+        let name = run_git(&dir, &["config", "--local", "--get", "user.name"]).unwrap();
+        let email = run_git(&dir, &["config", "--local", "--get", "user.email"]).unwrap();
+        assert_eq!(name.trim(), "kd_test");
+        assert_eq!(email.trim(), "kd_test@bridges.local");
 
         let _ = fs::remove_dir_all(&dir);
     }

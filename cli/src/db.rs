@@ -94,12 +94,4 @@ CREATE TABLE IF NOT EXISTS agent_skills (
     description         TEXT,
     created_at          TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS sync_state (
-    project_id          TEXT NOT NULL,
-    peer_node_id        TEXT NOT NULL,
-    last_sync_at        TEXT,
-    last_version        INTEGER,
-    PRIMARY KEY (project_id, peer_node_id)
-);
 "#;

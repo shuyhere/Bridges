@@ -3,7 +3,7 @@ import type { ToolDefinition } from './shared.js';
 
 export const syncProject: ToolDefinition = {
   name: 'sync_project',
-  description: 'Sync the current project checkout with the shared remote state.',
+  description: 'Optionally sync the current project checkout\'s shared workspace files with remote state.',
   parameters: {
     type: 'object',
     properties: {
@@ -25,7 +25,7 @@ export const syncProject: ToolDefinition = {
 
 export const getChanges: ToolDefinition = {
   name: 'sync_proposal',
-  description: 'Read the local sync approval proposal generated for risky sync.',
+  description: 'Read the local approval proposal generated for a risky optional workspace sync.',
   parameters: {
     type: 'object',
     properties: {

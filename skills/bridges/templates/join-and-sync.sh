@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bridges: Join a project and sync initial state
+# Bridges: Join a project and optionally sync shared workspace state
 #
 # Usage:
 #   chmod +x join-and-sync.sh
@@ -19,10 +19,10 @@ echo "Joining project..."
 cd "$PROJECT_DIR"
 bridges join --project "$PROJECT_ID" "$TOKEN"
 
-# Step 2: Initial sync
+# Step 2: Optional sync
 echo ""
-echo "Syncing project state..."
-bridges sync --project "$PROJECT_ID"
+echo "Optionally syncing shared workspace state..."
+bridges sync --project "$PROJECT_ID" || true
 
 # Step 3: Show project status
 echo ""
@@ -30,7 +30,7 @@ echo "=== Project Status ==="
 bridges members --project "$PROJECT_ID"
 echo ""
 echo "Project files live in: ~/bridges-projects/<slug>/"
-echo "Read .shared/PROJECT.md, .shared/TODOS.md, and .shared/MEMBERS.md for context."
+echo "Read .shared/PROJECT.md, .shared/TODOS.md, and .shared/MEMBERS.md for context if your team uses shared workspace sync."
 
 echo ""
 echo "=== Ready ==="

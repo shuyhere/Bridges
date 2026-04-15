@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -80,12 +80,6 @@ pub fn derive_node_id(public_key: &VerifyingKey) -> String {
     let hash = hasher.finalize();
     let truncated = &hash[..20];
     format!("kd_{}", bs58::encode(truncated).into_string())
-}
-
-/// Sign a message with the secret key, return raw signature bytes.
-pub fn sign(message: &[u8], signing_key: &SigningKey) -> Vec<u8> {
-    let sig = signing_key.sign(message);
-    sig.to_bytes().to_vec()
 }
 
 #[cfg(test)]

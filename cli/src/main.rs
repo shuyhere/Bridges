@@ -20,7 +20,6 @@ mod service;
 mod stun;
 mod sync_engine;
 mod transport;
-mod watcher;
 mod workspace;
 
 use clap::{Parser, Subcommand};
@@ -71,7 +70,7 @@ enum Commands {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Sync .shared/ directory with all project peers
+    /// Optionally sync shared workspace files for a project
     Sync {
         /// Project ID (auto-resolves path)
         #[arg(short, long)]
@@ -85,11 +84,6 @@ enum Commands {
     },
     /// Show node identity and project status
     Status,
-    /// Watch for peer changes on a polling interval
-    Watch {
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-    },
     /// Ping a peer to test encrypted connectivity
     Ping {
         /// Node ID to ping (kd_xxx)
@@ -226,7 +220,7 @@ enum SessionAction {
 }
 
 /// Entry point — most commands run without tokio (blocking HTTP).
-/// Only daemon, serve, sync, watch, ping need the async runtime.
+/// Only daemon, serve, sync, and ping need the async runtime.
 fn main() {
     let cli = Cli::parse();
 
@@ -430,7 +424,7 @@ fn main() {
                     }
                     if !result.conflicts.is_empty() {
                         println!("CONFLICTS: {}", result.conflicts.join(", "));
-                        println!("Resolve conflicts in .shared/ then sync again");
+                        println!("Resolve conflicts in shared workspace files, then sync again");
                     }
                     for warning in &result.warnings {
                         println!("SYNC WARNING: {}", warning);
@@ -438,18 +432,6 @@ fn main() {
                 }
                 Err(e) => eprintln!("Sync failed: {}", e),
             }
-        }
-        Commands::Watch { path } => {
-            let conn = db::open_db();
-            db::init_db(&conn);
-            drop(conn);
-            let (signing_key, verifying_key) = identity::load_or_create_keypair();
-            let node_id = identity::derive_node_id(&verifying_key);
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(cmd_watch(&node_id, &signing_key, path));
         }
         Commands::Ping { node_id } => {
             let conn = db::open_db();
@@ -592,12 +574,5 @@ async fn cmd_ping(node_id: &str, _signing_key: &ed25519_dalek::SigningKey, targe
         Err(_) => {
             eprintln!("  daemon not running (start with: bridges daemon)");
         }
-    }
-}
-
-async fn cmd_watch(node_id: &str, signing_key: &ed25519_dalek::SigningKey, path: Option<PathBuf>) {
-    let project_path = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-    if let Err(e) = watcher::start_watching(&project_path, node_id, signing_key).await {
-        eprintln!("Watch failed: {}", e);
     }
 }

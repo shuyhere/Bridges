@@ -270,9 +270,12 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     let session_id = msg["sessionId"].as_str();
                     let payload = &msg["payload"];
 
-                    // Sync now goes through git-based project state, not relay
+                    // Shared-workspace sync is handled out of band, not through relay messages.
                     if kind == "sync" {
-                        println!("  sync message from {} (handled by git, skipping)", from);
+                        println!(
+                            "  sync message from {} (handled out of band, skipping)",
+                            from
+                        );
                         continue;
                     }
 
@@ -432,7 +435,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                 let session_id = parsed["sessionId"].as_str();
                 let payload = &parsed["payload"];
 
-                // Sync goes through git-based project state, not mailbox
+                // Shared-workspace sync is handled out of band, not through mailbox.
                 if kind == "sync" {
                     continue;
                 }

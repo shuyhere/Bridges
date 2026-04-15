@@ -19,7 +19,7 @@ Example: `kd_7Xq9mR3vKpNwYz`
 │   └── keypair.json    # Ed25519 keypair — NEVER shared
 ├── config.json         # coordination + API key
 ├── daemon.json         # local daemon configuration
-└── bridges.db            # SQLite — peers, projects, sync state
+└── bridges.db         # SQLite — peers, projects, and local metadata
 ```
 
 ## Request signing

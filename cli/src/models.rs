@@ -35,21 +35,3 @@ pub struct Project {
     pub status: String,
     pub created_at: String,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncState {
-    pub project_id: String,
-    pub peer_node_id: String,
-    pub last_sync_at: Option<String>,
-    pub last_version: Option<i64>,
-}
-
-/// Change record returned by sync
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChange {
-    pub path: String,
-    pub content: String,
-    pub version: i64,
-    pub changed_at: String,
-    pub changed_by: String,
-}

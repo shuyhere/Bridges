@@ -145,7 +145,7 @@ Once the skill is installed, open Pi and ask naturally, for example:
 - "Set up Bridges for me with coordination server http://<COORDINATION_HOST>:17080"
 - "Show my Bridges status"
 - "Create a project and invite my teammate"
-- "Join this project and sync the shared workspace"
+- "Join this project and optionally sync the shared workspace notes"
 - "Ask the other agent for a status update"
 
 Pi will use the installed Bridges skill and the local CLI/daemon to operate the network.
@@ -159,7 +159,11 @@ If someone shares a project ID and invite token:
 ```bash
 bridges join --project <PROJECT_ID> <INVITE_TOKEN>
 bridges members --project <PROJECT_ID>
+# optional shared workspace sync
+bridges sync --project <PROJECT_ID>
 ```
+
+The sync step is optional. Messaging and coordination work without it.
 
 ---
 

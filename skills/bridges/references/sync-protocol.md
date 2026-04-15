@@ -2,12 +2,16 @@
 
 ## Current model
 
-Bridges sync is git-based.
+`bridges sync` is an **optional** shared-workspace feature.
 
-- each project checkout is a git repo
-- an optional git remote can host the shared repository
-- Bridges syncs managed project state from `.shared/`
-- `.bridges/` stays local and is not git-synced
+Bridges core coordination, membership, messaging, broadcast, publish, and session handling do not require git.
+
+When a user explicitly runs `bridges sync`:
+
+- Bridges manages shared project files from `.shared/`
+- `.bridges/` stays local and is never shared
+- a local git repo is created on demand if needed
+- an optional git remote can be used to exchange the shared workspace state
 
 ## What `bridges sync` does
 
@@ -20,11 +24,14 @@ bridges sync --project proj_xxx
 Bridges:
 
 1. ensures `.shared/` exists
-2. stages and commits managed local changes from `.shared/` and `.gitignore`
-3. pushes to the remote when possible
-4. fetches remote changes
-5. merges remote changes if safe
-6. pushes again after a successful merge when needed
+2. ensures an optional local sync repo exists for the project
+3. stages and commits managed local changes from `.shared/` and `.gitignore`
+4. pushes to the remote when possible
+5. fetches remote changes
+6. merges remote changes if safe
+7. pushes again after a successful merge when needed
+
+If no remote is configured, the command still prepares the local managed workspace safely.
 
 ## Managed vs unmanaged paths
 

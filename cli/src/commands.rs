@@ -196,15 +196,9 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
     let project_dir = crate::queries::project_dir_for_slug(name);
     std::fs::create_dir_all(&project_dir).ok();
 
-    // Init .bridges/ and .shared/
+    // Initialize local workspace metadata and optional shared workspace files.
     crate::workspace::init_workspace(&project_dir, name);
     crate::sync_engine::init_shared(&project_dir);
-
-    // Init git repo with "main" as default branch
-    if let Err(e) = crate::sync_engine::git_init(&project_dir) {
-        eprintln!("  git init failed: {}", e);
-    }
-    crate::sync_engine::git_commit(&project_dir, "init project").ok();
 
     // Store in local DB with path
     let conn = crate::db::open_db();
@@ -293,11 +287,7 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
         dir
     };
 
-    if let Err(e) = crate::sync_engine::git_init(&project_dir) {
-        eprintln!("  git init failed: {}", e);
-    }
-
-    // Init .bridges/ and .shared/
+    // Initialize local workspace metadata and optional shared workspace files.
     crate::workspace::init_workspace(&project_dir, &slug);
     crate::sync_engine::init_shared(&project_dir);
 
@@ -486,18 +476,11 @@ pub fn cmd_session_reset(project_id: &str, peer_id: &str, session_id: Option<&st
     );
 }
 
-/// Auto-sync .shared/ before communication commands.
-fn auto_sync(_project_id: &str) {
-    // Sync is now manual-only via `bridges sync`.
-    // Auto-sync before ask/debate caused git conflicts and slowed down messaging.
-}
-
-/// Ask another agent a question — auto-syncs, sends E2E encrypted, waits for response.
+/// Ask another agent a question — sends E2E encrypted and waits for a response.
 pub fn cmd_ask(node_id: &str, question: &str, project_id: Option<&str>, new_session: bool) {
     ensure_daemon();
 
     let pid = project_id.unwrap_or("");
-    auto_sync(pid);
 
     let client = reqwest::blocking::Client::new();
     let url = format!("{}/ask", daemon_url());
@@ -544,10 +527,9 @@ pub fn cmd_ask(node_id: &str, question: &str, project_id: Option<&str>, new_sess
     }
 }
 
-/// Start a debate — auto-syncs, sends to all members, collects responses.
+/// Start a debate — sends to all members and collects responses.
 pub fn cmd_debate(topic: &str, project_id: &str, new_session: bool) {
     ensure_daemon();
-    auto_sync(project_id);
     let client = reqwest::blocking::Client::new();
     let url = format!("{}/debate", daemon_url());
     let body = serde_json::json!({

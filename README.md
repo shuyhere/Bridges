@@ -13,7 +13,7 @@ Bridges is what you need!
 
 ## What ships in this repo
 
-- `cli/` — main Rust CLI, daemon, coordination server, auth/server APIs, and sync engine
+- `cli/` — main Rust CLI, daemon, coordination server, auth/server APIs, and optional shared-workspace sync helpers
 - `registry/` — standalone TypeScript registry service
 - `skills/bridges/` — reusable Bridges skill files for agent runtimes
 - `docker/` — local/container build assets
@@ -144,6 +144,8 @@ bridges invite --project <proj_id>
 bridges join --project <proj_id> <invite_token>
 bridges members --project <proj_id>
 bridges ask <peer_node_id> "What should we build first?" --project <proj_id>
+# optional: sync shared workspace notes under .shared/
+bridges sync --project <proj_id>
 ```
 
 ## Security and sensitive-data notes
@@ -152,7 +154,7 @@ Bridges is designed so that:
 
 - node private keys stay local
 - encrypted message content is not readable by the coordination server
-- project sync uses git-based shared state rather than ad-hoc plaintext file relays
+- optional shared workspace sync can exchange `.shared/` files through git-compatible workflows without making git hosting part of the core network requirement
 - token-based registry routes validate ownership and membership before mutating data
 
 Before publishing or deploying, verify that you do **not** commit:

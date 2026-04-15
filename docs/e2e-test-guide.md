@@ -69,6 +69,14 @@ Verify from either side:
 bridges members --project <PROJECT_ID>
 ```
 
+Optional shared workspace sync:
+
+```bash
+bridges sync --project <PROJECT_ID>
+```
+
+This is optional. The encrypted messaging path does not depend on git-based workspace sync.
+
 ---
 
 ## 4. Start the daemon on both machines

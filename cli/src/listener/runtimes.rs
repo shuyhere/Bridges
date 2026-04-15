@@ -38,7 +38,7 @@ fn build_prompt(query: &str, meta: &MessageMeta, project_dir: Option<&str>) -> S
         .filter(|value| !value.is_empty());
     let project = sanitize_meta(&meta.project_id);
 
-    // Read project context from .shared/ files if available
+    // Read local shared workspace context from .shared/ files if available
     let context = if let Some(dir) = project_dir {
         let shared = std::path::Path::new(dir).join(".shared");
         let mut ctx = String::new();
@@ -58,7 +58,7 @@ fn build_prompt(query: &str, meta: &MessageMeta, project_dir: Option<&str>) -> S
         if ctx.is_empty() {
             String::new()
         } else {
-            format!("\n[Project Context (from .shared/ files)]\n{}\n", ctx)
+            format!("\n[Project Context (from local .shared/ files)]\n{}\n", ctx)
         }
     } else {
         String::new()
@@ -94,7 +94,7 @@ fn build_prompt(query: &str, meta: &MessageMeta, project_dir: Option<&str>) -> S
          --- END PEER MESSAGE ---\n\
          \n\
          [Runtime Instructions]\n\
-         - If the request is about Bridges itself, Bridges setup, daemon/service health, runtime registration, projects, invites, joins, members, ask/debate/broadcast, sync, sessions, or collaboration debugging, use the installed `bridges` skill and inspect the local Bridges codebase before answering.\n\
+         - If the request is about Bridges itself, Bridges setup, daemon/service health, runtime registration, projects, invites, joins, members, ask/debate/broadcast, optional shared-workspace sync, sessions, or collaboration debugging, use the installed `bridges` skill and inspect the local Bridges codebase before answering.\n\
          - Prefer checking live Bridges state with `bridges` commands and relevant local files over guessing.\n\
          - For project-status questions, ground the answer in the local project checkout and `.shared/` files when present.\n\
          - Be concise, but be specific about real state and failures.\n\

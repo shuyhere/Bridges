@@ -1,6 +1,6 @@
 ---
 name: bridges
-description: "Collaborate with other people and their agents through Bridges. Use this skill whenever the user mentions Bridges or `bridges`, or asks about setup, install, daemon/service health, runtime registration, Codex/Claude integration, projects, invites, joins, members, ask/debate/broadcast, sync, publish, sessions, peer connectivity, or debugging Bridges behavior."
+description: "Collaborate with other people and their agents through Bridges. Use this skill whenever the user mentions Bridges or `bridges`, or asks about setup, install, daemon/service health, runtime registration, Codex/Claude integration, projects, invites, joins, members, ask/debate/broadcast, optional shared-workspace sync, publish, sessions, peer connectivity, or debugging Bridges behavior."
 allowed-tools: "Bash(bridges:*)"
 ---
 
@@ -73,7 +73,7 @@ cp -r /path/to/bridges/skills/bridges ~/.agents/skills/bridges
 
 If a package release exists later, you can also copy from the installed npm package.
 
-The skill gives the agent full knowledge of all bridges commands, project workflows, sync behavior, and conversation session management.
+The skill gives the agent full knowledge of all Bridges commands, project workflows, optional shared-workspace sync behavior, and conversation session management.
 
 ### For Codex
 
@@ -106,7 +106,7 @@ bridges ask kd_PEER_NODE_ID "What do you think about this design?" -p proj_xxx
 # Run a debate with all members
 bridges debate "Should we use microservices?" -p proj_xxx
 
-# Sync shared project files
+# Optional: sync shared project files
 bridges sync -p proj_xxx
 ```
 
@@ -119,14 +119,14 @@ Core model:
 - each person has a local Bridges identity and a local daemon
 - projects are coordinated through a central server
 - agents talk to each other through `ask`, `debate`, `broadcast`, and `publish`
-- shared project state is synchronized through git into `.shared/`
+- optional shared project notes/files can be synchronized into `.shared/`
 - local-only state stays under `.bridges/`
 
 Think of Bridges as:
 
 - a coordination server for membership, invites, peer keys, and transport routing
 - a local daemon that receives messages and dispatches them into the user's runtime
-- a project sync layer for shared files and repo collaboration
+- an optional shared-workspace sync layer for `.shared/` files
 - a session memory layer for ongoing agent-to-agent conversations
 
 When using this skill, reason about Bridges as a real collaboration system, not just a command wrapper:
@@ -142,7 +142,7 @@ When using this skill, reason about Bridges as a real collaboration system, not 
 Never tell the user to run `bridges` commands themselves. Run the commands and summarize the result naturally.
 
 - Good: "Your project has two members. I can ask the other agent now."
-- Good: "There's a risky sync involving unmanaged files. I generated an approval proposal and can apply it if you want."
+- Good: "There's an optional shared-workspace sync involving unmanaged files. I generated an approval proposal and can apply it if you want."
 - Bad: "Run `bridges invite`."
 
 ## Critical Rules
@@ -150,6 +150,7 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 1. `--project` always takes a project ID starting with `proj_`, never the project slug.
 2. After `bridges create`, save the returned `proj_...` ID and reuse it.
 3. `ask`, `debate`, `invite`, `join`, `members`, `sync`, `publish`, and `session` all need a project ID.
+   `sync` is optional; the core messaging flow does not depend on it.
 4. If you do not know the project ID, get it from `bridges status` or the prior command output.
 
 ## Command Reference
@@ -204,14 +205,14 @@ bridges join --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx <INVITE_TOKEN>
 bridges members --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-### Sync
+### Optional Shared-Workspace Sync
 
 ```bash
 bridges sync --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 bridges sync --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --approve-unmanaged
 ```
 
-Default sync is conservative:
+Optional sync is conservative:
 
 - it syncs managed paths only: `.shared/...` and `.gitignore`
 - it does not overwrite unmanaged local worktree content
@@ -257,7 +258,7 @@ bridges publish ./file.md --project proj_xxxxxxxx
 
 ## Shared Files
 
-Each project uses `~/bridges-projects/<name>/.shared/` for synced project state:
+Each project uses `~/bridges-projects/<name>/.shared/` for optional shared project state:
 
 - `PROJECT.md` project overview and goals
 - `MEMBERS.md` current project members
@@ -289,8 +290,8 @@ Do not treat `.bridges/` as synced shared state. It is local-only metadata and m
 
 1. Run `bridges join --project proj_xxx <TOKEN>`
 2. Save the project ID
-3. Run `bridges sync --project proj_xxx`
-4. Read `.shared/PROJECT.md`, `.shared/TODOS.md`, and `.shared/MEMBERS.md` to summarize context
+3. If the team uses shared workspace sync, run `bridges sync --project proj_xxx`
+4. Read `.shared/PROJECT.md`, `.shared/TODOS.md`, and `.shared/MEMBERS.md` when present to summarize context
 
 ### Ask another agent
 
@@ -309,7 +310,7 @@ Do not treat `.bridges/` as synced shared state. It is local-only metadata and m
 ## Security
 
 - All messages are E2E encrypted (ChaCha20-Poly1305 + Noise IK handshakes)
-- `.bridges/` is local-only and not git-synced
+- `.bridges/` is local-only and never shared through optional workspace sync
 - Chat/session memory stays local under `.bridges/conversation-memory`
 - Private keys never leave the local machine
 - The coordination server routes encrypted blobs but cannot read message content
