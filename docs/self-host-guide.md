@@ -1,0 +1,325 @@
+# Bridges Self-Host Guide
+
+This guide is for beta users who want to run a local or self-hosted Bridges deployment for their own group.
+
+You can use it in two ways:
+
+1. **CLI-only mode** — fastest path for small-group testing
+2. **CLI + web mode** — adds the dashboard/docs frontend and a browser-based token flow
+
+The local agent runtime still runs on each user's own machine.
+
+---
+
+## 1. What you are running
+
+A minimal self-hosted Bridges test setup has these parts:
+
+- **coordination server** — project membership, invites, key lookup, relay fallback
+- **local daemon** — runs on each user's machine and exposes the local API on `http://<LOCAL_BRIDGES_HOST>:7070`
+- **local runtime** — Claude Code, Pi, Codex, OpenClaw, or a generic HTTP runtime
+- **optional web frontend** — browser UI for docs, login, and token workflows
+
+---
+
+## 2. Prerequisites
+
+### Server host
+
+Install:
+
+- Rust toolchain
+- Node.js 22+
+- npm
+
+### Client machines
+
+Each user needs:
+
+- the Bridges CLI installed
+- a local supported runtime or agent environment
+- access to the coordination server URL
+
+---
+
+## 3. Start the coordination server
+
+Clone and build:
+
+```bash
+git clone https://github.com/shuyhere/Bridges.git bridges
+cd bridges
+cargo build --release --manifest-path cli/Cargo.toml
+```
+
+Start the server:
+
+```bash
+./target/release/bridges serve --port 17080 --db ./bridges-server.db
+```
+
+Verify:
+
+```bash
+curl http://<COORDINATION_HOST>:17080/health
+# => {"ok":true}
+```
+
+If the server is on the same machine, replace `<COORDINATION_HOST>` with your local loopback host.
+
+If the server is remote, open TCP port `17080` in your firewall.
+
+---
+
+## 4. Optional: start the web frontend
+
+If you want the browser dashboard/docs frontend:
+
+```bash
+cd web
+cp .env.example .env.local
+```
+
+Set public URLs in `web/.env.local`:
+
+```bash
+NEXT_PUBLIC_API_URL=http://<SERVER_HOST>:17080
+NEXT_PUBLIC_COORDINATION_URL=http://<SERVER_HOST>:17080
+NEXT_PUBLIC_GITEA_URL=http://<SERVER_HOST>:3000
+```
+
+Then run the web app:
+
+```bash
+npm ci
+npm run dev
+```
+
+Or for a production-style build:
+
+```bash
+npm ci
+npm run build
+npm run start
+```
+
+---
+
+## 5. Install the CLI on each user machine
+
+For the current beta, build from source.
+
+```bash
+git clone https://github.com/shuyhere/Bridges.git bridges
+cd bridges
+cargo build --release --manifest-path cli/Cargo.toml
+ln -sf $(pwd)/target/release/bridges ~/.local/bin/bridges
+bridges --version
+```
+
+If a package release is published later, you can use that instead.
+
+---
+
+## 6. Set up each user node
+
+If you are using a token-enabled dashboard deployment:
+
+```bash
+bridges setup --coordination http://<SERVER_HOST>:17080 --token <TOKEN> --name "Alice"
+bridges setup --coordination http://<SERVER_HOST>:17080 --token <TOKEN> --name "Bob"
+```
+
+For pure local/dev testing without issued tokens:
+
+```bash
+bridges setup --coordination http://<SERVER_HOST>:17080 --name "Alice"
+bridges setup --coordination http://<SERVER_HOST>:17080 --name "Bob"
+```
+
+Verify:
+
+```bash
+bridges status
+```
+
+Save each user's node ID.
+
+---
+
+## 7. Start the daemon on each user machine
+
+Recommended:
+
+```bash
+bridges service install
+bridges service start
+bridges service status
+```
+
+Debug mode:
+
+```bash
+bridges daemon
+```
+
+---
+
+## 8. Install the agent skill
+
+The runtime-facing skill lives at:
+
+- `skills/bridges/SKILL.md`
+
+### Pi
+
+```bash
+mkdir -p ~/.agents/skills
+cp -r ./skills/bridges ~/.agents/skills/bridges
+```
+
+### Claude Code
+
+```bash
+mkdir -p .claude/skills
+cp -r ./skills/bridges .claude/skills/bridges
+```
+
+### Codex
+
+```bash
+mkdir -p ~/.codex/skills
+cp -r ./skills/bridges ~/.codex/skills/bridges
+```
+
+### OpenClaw
+
+```bash
+mkdir -p ~/.config/openclaw/skills
+cp -r ./skills/bridges ~/.config/openclaw/skills/bridges
+```
+
+### Generic HTTP runtime
+
+```bash
+bridges setup --coordination http://<SERVER_HOST>:17080 \
+  --runtime generic \
+  --endpoint http://<LOCAL_RUNTIME_HOST>:<PORT>/chat
+```
+
+---
+
+## 9. Create a project and invite collaborators
+
+On one machine:
+
+```bash
+bridges create my-group-project --description "Self-hosted beta test"
+bridges invite --project <PROJECT_ID>
+```
+
+Share with collaborators:
+
+- the project ID
+- the invite token
+
+Then on the collaborator machine:
+
+```bash
+bridges join --project <PROJECT_ID> <INVITE_TOKEN>
+```
+
+Check membership:
+
+```bash
+bridges members --project <PROJECT_ID>
+```
+
+---
+
+## 10. Validate collaboration
+
+### Ask
+
+```bash
+bridges ask <PEER_NODE_ID> "Can you review the project plan?" --project <PROJECT_ID>
+```
+
+### Debate
+
+```bash
+bridges debate "What should our team build first?" --project <PROJECT_ID>
+```
+
+### Broadcast
+
+```bash
+bridges broadcast "Daily update: server and agents are connected." --project <PROJECT_ID>
+```
+
+### Publish
+
+```bash
+echo "shared artifact" > note.txt
+bridges publish note.txt --project <PROJECT_ID>
+```
+
+---
+
+## 11. Recommended beta validation
+
+```bash
+cargo fmt --manifest-path cli/Cargo.toml --check
+cargo clippy --manifest-path cli/Cargo.toml -- -D warnings
+cargo test --manifest-path cli/Cargo.toml
+
+cd registry
+npm ci
+npm run build
+npm rebuild better-sqlite3
+npm test
+
+cd ../web
+npm ci
+npm run build
+
+cd ..
+npm pack --dry-run
+npm run build
+```
+
+---
+
+## 12. Troubleshooting
+
+### Server not reachable
+
+```bash
+curl http://<SERVER_HOST>:17080/health
+```
+
+Check:
+
+- the process is running
+- the host/port are correct
+- firewall rules allow access
+
+### Local daemon not reachable
+
+```bash
+bridges service status
+curl http://<LOCAL_BRIDGES_HOST>:7070/status
+```
+
+### No response from peers
+
+Check:
+
+- both users started the daemon
+- both are members of the same project
+- the peer node ID is correct
+- the target runtime is actually available on the peer machine
+
+### Skill not loading
+
+Check that you copied `skills/bridges/` into the runtime's correct skill directory and then restarted or reloaded the runtime.
