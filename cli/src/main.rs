@@ -8,7 +8,6 @@ mod crypto;
 mod daemon;
 mod db;
 mod derp_client;
-mod gitea_setup;
 mod identity;
 mod listener;
 mod local_api;
@@ -68,7 +67,7 @@ enum Commands {
         /// Runtime endpoint URL (for openclaw/generic)
         #[arg(long, default_value = "")]
         endpoint: String,
-        /// Your display name (used for Gitea account and member list)
+        /// Your display name
         #[arg(long)]
         name: Option<String>,
     },
@@ -98,13 +97,10 @@ enum Commands {
     },
 
     // ── Coordination commands ──
-    /// Run the coordination server (+ Gitea for git sync)
+    /// Run the coordination server
     Serve {
         #[arg(short, long, default_value = "17080")]
         port: u16,
-        /// Gitea port for git hosting
-        #[arg(long, default_value = "3000")]
-        gitea_port: u16,
         /// Path to server SQLite database
         #[arg(long, default_value = "./bridges-server.db")]
         db: String,
@@ -177,84 +173,6 @@ enum Commands {
     Publish {
         /// File path to publish
         file: String,
-        #[arg(short, long)]
-        project: String,
-    },
-
-    // ── Gitea project management ──
-    /// Manage project issues
-    Issue {
-        #[command(subcommand)]
-        action: IssueAction,
-    },
-    /// Manage project milestones
-    Milestone {
-        #[command(subcommand)]
-        action: MilestoneAction,
-    },
-    /// Manage pull requests
-    Pr {
-        #[command(subcommand)]
-        action: PrAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum IssueAction {
-    Create {
-        title: String,
-        #[arg(short, long)]
-        project: String,
-        #[arg(long)]
-        body: Option<String>,
-        #[arg(long)]
-        assign: Option<String>,
-    },
-    List {
-        #[arg(short, long)]
-        project: String,
-    },
-    Show {
-        number: u64,
-        #[arg(short, long)]
-        project: String,
-    },
-    Comment {
-        number: u64,
-        text: String,
-        #[arg(short, long)]
-        project: String,
-    },
-    Close {
-        number: u64,
-        #[arg(short, long)]
-        project: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum MilestoneAction {
-    Create {
-        title: String,
-        #[arg(short, long)]
-        project: String,
-        #[arg(long)]
-        due: Option<String>,
-    },
-    List {
-        #[arg(short, long)]
-        project: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum PrAction {
-    Create {
-        title: String,
-        #[arg(short, long)]
-        project: String,
-    },
-    List {
         #[arg(short, long)]
         project: String,
     },
@@ -449,76 +367,8 @@ fn main() {
                 }
             },
         },
-        Commands::Issue { action } => match action {
-            IssueAction::Create {
-                title,
-                project,
-                body,
-                assign,
-            } => {
-                commands::cmd_issue_create(&title, &project, body.as_deref(), assign.as_deref());
-            }
-            IssueAction::List { project } => {
-                commands::cmd_issue_list(&project);
-            }
-            IssueAction::Show { number, project } => {
-                commands::cmd_issue_show(number, &project);
-            }
-            IssueAction::Comment {
-                number,
-                text,
-                project,
-            } => {
-                commands::cmd_issue_comment(number, &text, &project);
-            }
-            IssueAction::Close { number, project } => {
-                commands::cmd_issue_close(number, &project);
-            }
-        },
-        Commands::Milestone { action } => match action {
-            MilestoneAction::Create {
-                title,
-                project,
-                due,
-            } => {
-                commands::cmd_milestone_create(&title, &project, due.as_deref());
-            }
-            MilestoneAction::List { project } => {
-                commands::cmd_milestone_list(&project);
-            }
-        },
-        Commands::Pr { action } => match action {
-            PrAction::Create { title, project } => {
-                commands::cmd_pr_create(&title, &project);
-            }
-            PrAction::List { project } => {
-                commands::cmd_pr_list(&project);
-            }
-        },
-
         // ── Async commands (need tokio for long-running networking) ──
-        Commands::Serve {
-            port,
-            gitea_port,
-            db,
-        } => {
-            // Start Gitea first (blocking setup, then child process)
-            let gitea_result = gitea_setup::ensure_and_start(gitea_port);
-            let _gitea_child = match gitea_result {
-                Ok((child, config)) => {
-                    println!(
-                        "  Gitea: {} (admin: {})",
-                        config.gitea_url, config.admin_user
-                    );
-                    child
-                }
-                Err(e) => {
-                    eprintln!("  Gitea setup failed: {} (continuing without)", e);
-                    None
-                }
-            };
-
-            // Then start bridges coordination server (async)
+        Commands::Serve { port, db } => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -687,14 +537,6 @@ fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
     if let Some(cfg) = client_config::ClientConfig::load() {
         println!("  coordination: {}", cfg.coordination);
         println!("  registered:   yes");
-        if let (Some(url), Some(user)) = (cfg.gitea_url.as_deref(), cfg.gitea_user.as_deref()) {
-            println!("  gitea:        yes");
-            println!("    user:       {}", user);
-            println!("    url:        {}", url);
-        } else {
-            println!("  gitea:        no");
-            println!("    reason:     server did not provide Gitea credentials during setup");
-        }
     } else {
         println!("  registered:   no");
     }

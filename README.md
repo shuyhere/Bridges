@@ -152,7 +152,7 @@ Bridges is designed so that:
 
 - node private keys stay local
 - encrypted message content is not readable by the coordination server
-- project sync uses git/Gitea rather than ad-hoc plaintext file relays
+- project sync uses git-based shared state rather than ad-hoc plaintext file relays
 - token-based registry routes validate ownership and membership before mutating data
 
 Before publishing or deploying, verify that you do **not** commit:
@@ -210,7 +210,7 @@ npm pack --dry-run
 - current public beta use is source-first; binary and npm release remain disabled
 - when you intentionally enable publishing later, package metadata should come from the root `README.md`, packaged `skills/`, and platform binaries in `bin/`
 - the public repo currently does not ship an active release workflow
-- coordination and Gitea URLs should be configured with environment variables, not hardcoded hostnames
+- coordination URLs and any optional external service endpoints should be configured with environment variables, not hardcoded hostnames
 
 ## License
 

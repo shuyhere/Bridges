@@ -139,27 +139,6 @@ pub fn get_project_path_by_slug(conn: &Connection, slug: &str) -> Option<String>
     .flatten()
 }
 
-/// Get a full project by its ID.
-pub fn get_project_by_id(conn: &Connection, project_id: &str) -> Option<Project> {
-    conn.query_row(
-        "SELECT project_id, slug, display_name, description, project_path, owner_principal_id, status, created_at FROM projects WHERE project_id = ?1",
-        params![project_id],
-        |row| {
-            Ok(Project {
-                project_id: row.get(0)?,
-                slug: row.get(1)?,
-                display_name: row.get(2)?,
-                description: row.get(3)?,
-                project_path: row.get(4)?,
-                owner_principal_id: row.get(5)?,
-                status: row.get(6)?,
-                created_at: row.get(7)?,
-            })
-        },
-    )
-    .ok()
-}
-
 // ── Sync State ──
 
 pub fn upsert_sync_state(conn: &Connection, state: &SyncState) {

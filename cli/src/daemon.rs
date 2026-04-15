@@ -270,7 +270,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     let session_id = msg["sessionId"].as_str();
                     let payload = &msg["payload"];
 
-                    // Sync now goes through git/Gitea, not relay
+                    // Sync now goes through git-based project state, not relay
                     if kind == "sync" {
                         println!("  sync message from {} (handled by git, skipping)", from);
                         continue;
@@ -432,7 +432,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                 let session_id = parsed["sessionId"].as_str();
                 let payload = &parsed["payload"];
 
-                // Sync goes through git/Gitea, not mailbox
+                // Sync goes through git-based project state, not mailbox
                 if kind == "sync" {
                     continue;
                 }

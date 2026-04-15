@@ -14,10 +14,6 @@ pub struct CreateProjectReq {
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
     pub description: Option<String>,
-    #[serde(rename = "giteaOwner")]
-    pub gitea_owner: Option<String>,
-    #[serde(rename = "giteaRepo")]
-    pub gitea_repo: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -30,10 +26,6 @@ pub struct ProjectResp {
     pub description: Option<String>,
     #[serde(rename = "createdBy")]
     pub created_by: String,
-    #[serde(rename = "giteaOwner")]
-    pub gitea_owner: Option<String>,
-    #[serde(rename = "giteaRepo")]
-    pub gitea_repo: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
 }
@@ -53,7 +45,6 @@ pub struct MemberResp {
 }
 
 pub fn routes(state: Arc<ServerState>) -> Router {
-    // All project + invite + join routes in one router to avoid axum merge conflicts
     Router::new()
         .route("/v1/projects", post(create_project))
         .route("/v1/projects", get(list_projects))
@@ -68,7 +59,6 @@ pub fn routes(state: Arc<ServerState>) -> Router {
             "/v1/projects/:id/join",
             axum::routing::post(super::invites::join_project_handler),
         )
-        // Sync goes through /v1/relay (zero-knowledge encrypted blobs)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -83,17 +73,15 @@ async fn create_project(
 ) -> Result<Json<ProjectResp>, StatusCode> {
     let project_id = format!("proj_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
-    let gitea_repo = req.gitea_repo.clone().or_else(|| Some(req.slug.clone()));
 
     let db = state.db.lock().await;
     db.execute(
-        "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, gitea_owner, gitea_repo, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![project_id, req.slug, req.display_name, req.description, auth.0, req.gitea_owner, gitea_repo, now],
+        "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![project_id, req.slug, req.display_name, req.description, auth.0, now],
     )
     .map_err(|_| StatusCode::CONFLICT)?;
 
-    // Creator auto-joins as owner.
     db.execute(
         "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) \
          VALUES (?1, ?2, 'owner', ?3)",
@@ -107,8 +95,6 @@ async fn create_project(
         display_name: req.display_name,
         description: req.description,
         created_by: auth.0,
-        gitea_owner: req.gitea_owner,
-        gitea_repo,
         created_at: now,
     }))
 }
@@ -120,7 +106,7 @@ async fn list_projects(
     let db = state.db.lock().await;
     let mut stmt = db
         .prepare(
-            "SELECT p.project_id, p.slug, p.display_name, p.description, p.created_by, p.gitea_owner, p.gitea_repo, p.created_at \
+            "SELECT p.project_id, p.slug, p.display_name, p.description, p.created_by, p.created_at \
              FROM server_projects p \
              JOIN server_members m ON p.project_id = m.project_id \
              WHERE m.node_id = ?1",
@@ -134,9 +120,7 @@ async fn list_projects(
                 display_name: row.get(2)?,
                 description: row.get(3)?,
                 created_by: row.get(4)?,
-                gitea_owner: row.get(5)?,
-                gitea_repo: row.get(6)?,
-                created_at: row.get(7)?,
+                created_at: row.get(5)?,
             })
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -151,7 +135,6 @@ async fn get_project(
     Path(id): Path<String>,
 ) -> Result<Json<ProjectResp>, StatusCode> {
     let db = state.db.lock().await;
-    // Verify caller is a member of the project
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
@@ -163,7 +146,7 @@ async fn get_project(
         return Err(StatusCode::FORBIDDEN);
     }
     db.query_row(
-        "SELECT project_id, slug, display_name, description, created_by, gitea_owner, gitea_repo, created_at \
+        "SELECT project_id, slug, display_name, description, created_by, created_at \
          FROM server_projects WHERE project_id = ?1",
         rusqlite::params![id],
         |row| {
@@ -173,9 +156,7 @@ async fn get_project(
                 display_name: row.get(2)?,
                 description: row.get(3)?,
                 created_by: row.get(4)?,
-                gitea_owner: row.get(5)?,
-                gitea_repo: row.get(6)?,
-                created_at: row.get(7)?,
+                created_at: row.get(5)?,
             })
         },
     )
@@ -189,7 +170,6 @@ async fn list_members(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<MemberResp>>, StatusCode> {
     let db = state.db.lock().await;
-    // Verify caller is a member of the project
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",

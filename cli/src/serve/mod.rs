@@ -12,23 +12,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
-/// Gitea admin config loaded from gitea-admin.json.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GiteaConfig {
-    pub gitea_url: String,
-    pub admin_user: String,
-    pub admin_token: String,
-    #[serde(default)]
-    pub admin_password: Option<String>,
-    /// External URL for clients (if different from gitea_url which is localhost)
-    #[serde(default)]
-    pub external_url: Option<String>,
-}
-
 /// Shared state for all server routes.
 pub struct ServerState {
     pub db: Mutex<Connection>,
-    pub gitea: Option<GiteaConfig>,
 }
 
 /// Initialize the server database schema.
@@ -36,12 +22,10 @@ pub fn init_server_db(conn: &Connection) {
     conn.execute_batch(SERVER_SCHEMA)
         .expect("failed to init server schema");
 
-    add_column_if_missing(conn, "registered_nodes", "gitea_user", "TEXT");
     add_column_if_missing(conn, "registered_nodes", "endpoint_hints", "TEXT");
-    add_column_if_missing(conn, "server_projects", "gitea_owner", "TEXT");
-    add_column_if_missing(conn, "server_projects", "gitea_repo", "TEXT");
 
-    migrate_registered_nodes_remove_user_id(conn);
+    migrate_registered_nodes_to_core(conn);
+    migrate_server_projects_to_core(conn);
     remove_legacy_user_state(conn);
 }
 
@@ -66,14 +50,15 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
     has_column
 }
 
-fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
-    if !table_has_column(conn, "registered_nodes", "user_id") {
+fn migrate_registered_nodes_to_core(conn: &Connection) {
+    let needs_migration = table_has_column(conn, "registered_nodes", "gitea_user")
+        || table_has_column(conn, "registered_nodes", "user_id");
+    if !needs_migration {
         return;
     }
 
     conn.execute_batch(
         r#"
-        DROP INDEX IF EXISTS idx_nodes_user;
         DROP TABLE IF EXISTS registered_nodes_new;
         CREATE TABLE registered_nodes_new (
             node_id         TEXT PRIMARY KEY,
@@ -81,7 +66,6 @@ fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
             x25519_pubkey   TEXT NOT NULL,
             display_name    TEXT,
             owner_name      TEXT,
-            gitea_user      TEXT,
             api_key_hash    TEXT NOT NULL,
             endpoint_hints  TEXT,
             created_at      TEXT NOT NULL
@@ -93,7 +77,6 @@ fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
             x25519_pubkey,
             display_name,
             owner_name,
-            gitea_user,
             api_key_hash,
             endpoint_hints,
             created_at
@@ -104,7 +87,6 @@ fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
             x25519_pubkey,
             display_name,
             owner_name,
-            gitea_user,
             api_key_hash,
             endpoint_hints,
             created_at
@@ -115,6 +97,49 @@ fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
         "#,
     )
     .expect("migrate registered_nodes to core schema");
+}
+
+fn migrate_server_projects_to_core(conn: &Connection) {
+    let needs_migration = table_has_column(conn, "server_projects", "gitea_owner")
+        || table_has_column(conn, "server_projects", "gitea_repo");
+    if !needs_migration {
+        return;
+    }
+
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS server_projects_new;
+        CREATE TABLE server_projects_new (
+            project_id      TEXT PRIMARY KEY,
+            slug            TEXT UNIQUE NOT NULL,
+            display_name    TEXT,
+            description     TEXT,
+            created_by      TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+
+        INSERT INTO server_projects_new (
+            project_id,
+            slug,
+            display_name,
+            description,
+            created_by,
+            created_at
+        )
+        SELECT
+            project_id,
+            slug,
+            display_name,
+            description,
+            created_by,
+            created_at
+        FROM server_projects;
+
+        DROP TABLE server_projects;
+        ALTER TABLE server_projects_new RENAME TO server_projects;
+        "#,
+    )
+    .expect("migrate server_projects to core schema");
 }
 
 fn remove_legacy_user_state(conn: &Connection) {
@@ -159,19 +184,8 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
     init_server_db(&conn);
 
-    let gitea = load_gitea_config();
-    if let Some(ref g) = gitea {
-        println!(
-            "Gitea integration: {} (admin: {})",
-            g.gitea_url, g.admin_user
-        );
-    } else {
-        println!("Gitea integration: disabled (no ~/.gitea-admin.json)");
-    }
-
     let state = Arc::new(ServerState {
         db: Mutex::new(conn),
-        gitea,
     });
     let app = router(state);
     let addr = format!("0.0.0.0:{}", port);
@@ -184,14 +198,6 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
         .map_err(|e| format!("serve: {}", e))
 }
 
-/// Load Gitea admin config from ~/.gitea-admin.json.
-fn load_gitea_config() -> Option<GiteaConfig> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".gitea-admin.json");
-    let data = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
 const SERVER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS registered_nodes (
     node_id         TEXT PRIMARY KEY,
@@ -199,7 +205,6 @@ CREATE TABLE IF NOT EXISTS registered_nodes (
     x25519_pubkey   TEXT NOT NULL,
     display_name    TEXT,
     owner_name      TEXT,
-    gitea_user      TEXT,
     api_key_hash    TEXT NOT NULL,
     endpoint_hints  TEXT,
     created_at      TEXT NOT NULL
@@ -211,8 +216,6 @@ CREATE TABLE IF NOT EXISTS server_projects (
     display_name    TEXT,
     description     TEXT,
     created_by      TEXT NOT NULL,
-    gitea_owner     TEXT,
-    gitea_repo      TEXT,
     created_at      TEXT NOT NULL
 );
 

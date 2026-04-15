@@ -5,7 +5,7 @@
 Bridges sync is git-based.
 
 - each project checkout is a git repo
-- Gitea hosts the remote repository
+- an optional git remote can host the shared repository
 - Bridges syncs managed project state from `.shared/`
 - `.bridges/` stays local and is not git-synced
 
@@ -66,7 +66,7 @@ On approved unmanaged sync:
 
 Conflicts are reported as conflicted file paths from git.
 
-Bridges does not currently auto-create a Gitea issue for conflicts.
+Bridges does not currently auto-create tickets or external workflow items for conflicts.
 
 User-visible signals:
 

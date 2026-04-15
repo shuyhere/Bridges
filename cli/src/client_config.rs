@@ -13,14 +13,6 @@ pub struct ClientConfig {
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
     pub owner: Option<String>,
-    #[serde(rename = "giteaUrl", skip_serializing_if = "Option::is_none")]
-    pub gitea_url: Option<String>,
-    #[serde(rename = "giteaUser", skip_serializing_if = "Option::is_none")]
-    pub gitea_user: Option<String>,
-    #[serde(rename = "giteaToken", skip_serializing_if = "Option::is_none")]
-    pub gitea_token: Option<String>,
-    #[serde(rename = "giteaPassword", skip_serializing_if = "Option::is_none")]
-    pub gitea_password: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -49,7 +41,6 @@ impl ClientConfig {
         let path = config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create .bridges dir");
-            // Set directory to 0700 (owner only)
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -58,7 +49,6 @@ impl ClientConfig {
         }
         let json = serde_json::to_string_pretty(self).unwrap();
         fs::write(&path, &json).expect("write config.json");
-        // Set file to 0600 (owner read/write only — contains API key)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

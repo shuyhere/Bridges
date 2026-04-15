@@ -50,14 +50,6 @@ pub struct RegisterResp {
     pub api_key: String,
     #[serde(rename = "nodeId")]
     pub node_id: String,
-    #[serde(rename = "giteaUrl", skip_serializing_if = "Option::is_none")]
-    pub gitea_url: Option<String>,
-    #[serde(rename = "giteaUser", skip_serializing_if = "Option::is_none")]
-    pub gitea_user: Option<String>,
-    #[serde(rename = "giteaToken", skip_serializing_if = "Option::is_none")]
-    pub gitea_token: Option<String>,
-    #[serde(rename = "giteaPassword", skip_serializing_if = "Option::is_none")]
-    pub gitea_password: Option<String>,
 }
 
 pub fn routes(state: Arc<ServerState>) -> Router {
@@ -84,37 +76,17 @@ async fn register(
     let key_hash = hash_api_key(&api_key);
     let now = chrono::Utc::now().to_rfc3339();
 
-    let (gitea_url, gitea_user, gitea_token, gitea_password) = if let Some(ref gitea) = state.gitea
-    {
-        match create_gitea_user(gitea, &req.node_id, req.display_name.as_deref()).await {
-            Ok((user, token, password)) => {
-                let client_url = gitea
-                    .external_url
-                    .clone()
-                    .unwrap_or_else(|| gitea.gitea_url.clone());
-                (Some(client_url), Some(user), Some(token), Some(password))
-            }
-            Err(e) => {
-                eprintln!("Gitea account creation failed: {} (continuing without)", e);
-                (None, None, None, None)
-            }
-        }
-    } else {
-        (None, None, None, None)
-    };
-
     let db = state.db.lock().await;
     db.execute(
         "INSERT OR REPLACE INTO registered_nodes \
-         (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, gitea_user, api_key_hash, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, api_key_hash, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
             req.node_id,
             req.ed25519_pubkey,
             req.x25519_pubkey,
             req.display_name,
             req.owner_name,
-            gitea_user,
             key_hash,
             now,
         ],
@@ -124,108 +96,7 @@ async fn register(
     Ok(Json(RegisterResp {
         api_key,
         node_id: req.node_id,
-        gitea_url,
-        gitea_user,
-        gitea_token,
-        gitea_password,
     }))
-}
-
-/// Create a Gitea user account and generate a personal access token.
-async fn create_gitea_user(
-    gitea: &super::GiteaConfig,
-    node_id: &str,
-    display_name: Option<&str>,
-) -> Result<(String, String, String), String> {
-    let client = reqwest::Client::new();
-    let gitea_url = &gitea.gitea_url;
-
-    let username = if let Some(name) = display_name {
-        name.to_lowercase()
-            .replace(' ', "-")
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-')
-            .take(20)
-            .collect::<String>()
-    } else {
-        node_id
-            .trim_start_matches("kd_")
-            .chars()
-            .take(20)
-            .collect::<String>()
-            .to_lowercase()
-    };
-    let full_name = display_name.unwrap_or(&username);
-    let password = format!("bridges_{}", uuid::Uuid::new_v4());
-    let email = format!("{}@bridges.local", username);
-
-    let body = serde_json::json!({
-        "username": username,
-        "password": password,
-        "email": email,
-        "full_name": full_name,
-        "must_change_password": false,
-    });
-    let resp = client
-        .post(format!("{}/api/v1/admin/users", gitea_url))
-        .header("Authorization", format!("token {}", gitea.admin_token))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("gitea create user: {}", e))?;
-
-    if !resp.status().is_success() && resp.status().as_u16() != 422 {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !text.contains("already exists") {
-            return Err(format!("gitea create user HTTP {} — {}", status, text));
-        }
-    }
-
-    let token_body = serde_json::json!({
-        "name": format!("bridges-{}", chrono::Utc::now().timestamp()),
-        "scopes": ["all"]
-    });
-    let token_resp = client
-        .post(format!("{}/api/v1/users/{}/tokens", gitea_url, username))
-        .basic_auth(&username, Some(&password))
-        .json(&token_body)
-        .send()
-        .await
-        .map_err(|e| format!("gitea create token: {}", e))?;
-
-    let token_resp = if !token_resp.status().is_success() {
-        let mut request = client
-            .post(format!("{}/api/v1/users/{}/tokens", gitea_url, username))
-            .json(&token_body);
-        if let Some(admin_password) = gitea.admin_password.as_deref() {
-            request = request.basic_auth(&gitea.admin_user, Some(admin_password));
-        } else {
-            request = request.header("Authorization", format!("token {}", gitea.admin_token));
-        }
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| format!("gitea create token (admin): {}", e))?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("gitea create token failed: {}", text));
-        }
-        resp
-    } else {
-        token_resp
-    };
-
-    let token_val: serde_json::Value = token_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse gitea token: {}", e))?;
-    let token = token_val["sha1"]
-        .as_str()
-        .ok_or_else(|| "no token in gitea response".to_string())?
-        .to_string();
-
-    Ok((username, token, password))
 }
 
 async fn refresh(
@@ -245,14 +116,7 @@ async fn refresh(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(RegisterResp {
-        api_key,
-        node_id,
-        gitea_url: None,
-        gitea_user: None,
-        gitea_token: None,
-        gitea_password: None,
-    }))
+    Ok(Json(RegisterResp { api_key, node_id }))
 }
 
 /// Middleware: verify Bearer token against `registered_nodes.api_key_hash` and inject `AuthNode`.

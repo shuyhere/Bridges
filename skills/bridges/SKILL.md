@@ -1,6 +1,6 @@
 ---
 name: bridges
-description: "Collaborate with other people and their agents through Bridges. Use this skill whenever the user mentions Bridges or `bridges`, or asks about setup, install, daemon/service health, runtime registration, Codex/Claude integration, projects, invites, joins, members, ask/debate/broadcast, sync, publish, sessions, Gitea, peer connectivity, or debugging Bridges behavior."
+description: "Collaborate with other people and their agents through Bridges. Use this skill whenever the user mentions Bridges or `bridges`, or asks about setup, install, daemon/service health, runtime registration, Codex/Claude integration, projects, invites, joins, members, ask/debate/broadcast, sync, publish, sessions, peer connectivity, or debugging Bridges behavior."
 allowed-tools: "Bash(bridges:*)"
 ---
 
@@ -34,7 +34,6 @@ This:
 - Generates Ed25519 keypairs locally (private key never leaves your machine)
 - Registers your node with the coordination server
 - Saves config to `~/.bridges/config.json`
-- Creates Gitea credentials for git-backed project sync
 
 ### Step 3: Verify
 
@@ -42,7 +41,7 @@ This:
 bridges status
 ```
 
-You should see your node ID, coordination server, and Gitea status.
+You should see your node ID and coordination server status.
 
 ### Step 4: Start the daemon
 
@@ -120,7 +119,7 @@ Core model:
 - each person has a local Bridges identity and a local daemon
 - projects are coordinated through a central server
 - agents talk to each other through `ask`, `debate`, `broadcast`, and `publish`
-- shared project state is synchronized through git/Gitea into `.shared/`
+- shared project state is synchronized through git into `.shared/`
 - local-only state stays under `.bridges/`
 
 Think of Bridges as:
@@ -150,7 +149,7 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 
 1. `--project` always takes a project ID starting with `proj_`, never the project slug.
 2. After `bridges create`, save the returned `proj_...` ID and reuse it.
-3. `ask`, `debate`, `invite`, `join`, `members`, `sync`, `publish`, `issue`, `milestone`, `pr`, and `session` all need a project ID.
+3. `ask`, `debate`, `invite`, `join`, `members`, `sync`, `publish`, and `session` all need a project ID.
 4. If you do not know the project ID, get it from `bridges status` or the prior command output.
 
 ## Command Reference
@@ -170,7 +169,7 @@ Coordination environment:
 
 - `--coordination` points at the central Bridges server
 - the coordination server handles registration, project membership, invites, peer key lookup, mailbox relay, and DERP relay
-- if Gitea is enabled on that server, `bridges setup` also returns the Gitea URL and saved credentials
+- optional git remote hosting is outside the core Bridges coordination flow
 - the local daemon listens on `http://<LOCAL_BRIDGES_HOST>:7070` by default and is the endpoint used by `ask`, `debate`, `broadcast`, and `publish`
 - `claude-code` and `codex` are local CLI runtimes that reuse the agent's own logged-in session instead of requiring a separate model API key
 - `openclaw` and `generic` are HTTP runtimes and may require explicit endpoint and token configuration
@@ -254,22 +253,6 @@ bridges session reset --project proj_xxxxxxxx --peer kd_xxxxxxxx --all
 
 ```bash
 bridges publish ./file.md --project proj_xxxxxxxx
-```
-
-### Gitea Project Management
-
-```bash
-bridges issue create "title" --project proj_xxx --body "description" --assign username
-bridges issue list --project proj_xxx
-bridges issue show 4 --project proj_xxx
-bridges issue comment 4 "text" --project proj_xxx
-bridges issue close 4 --project proj_xxx
-
-bridges milestone create "v0.1" --project proj_xxx --due 2026-04-15
-bridges milestone list --project proj_xxx
-
-bridges pr create "Update design" --project proj_xxx
-bridges pr list --project proj_xxx
 ```
 
 ## Shared Files

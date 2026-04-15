@@ -17,7 +17,7 @@ Example: `kd_7Xq9mR3vKpNwYz`
 ~/.bridges/
 ├── identity/
 │   └── keypair.json    # Ed25519 keypair — NEVER shared
-├── config.json         # coordination + API key + Gitea credentials
+├── config.json         # coordination + API key
 ├── daemon.json         # local daemon configuration
 └── bridges.db            # SQLite — peers, projects, sync state
 ```

@@ -94,7 +94,7 @@ fn build_prompt(query: &str, meta: &MessageMeta, project_dir: Option<&str>) -> S
          --- END PEER MESSAGE ---\n\
          \n\
          [Runtime Instructions]\n\
-         - If the request is about Bridges itself, Bridges setup, daemon/service health, runtime registration, projects, invites, joins, members, ask/debate/broadcast, sync, sessions, Gitea, or collaboration debugging, use the installed `bridges` skill and inspect the local Bridges codebase before answering.\n\
+         - If the request is about Bridges itself, Bridges setup, daemon/service health, runtime registration, projects, invites, joins, members, ask/debate/broadcast, sync, sessions, or collaboration debugging, use the installed `bridges` skill and inspect the local Bridges codebase before answering.\n\
          - Prefer checking live Bridges state with `bridges` commands and relevant local files over guessing.\n\
          - For project-status questions, ground the answer in the local project checkout and `.shared/` files when present.\n\
          - Be concise, but be specific about real state and failures.\n\

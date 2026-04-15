@@ -153,53 +153,12 @@ pub fn cmd_register(coordination: &str, display_name: Option<&str>) {
         }
     };
 
-    let gitea_user = val["giteaUser"].as_str().map(|s| s.to_string());
-    let gitea_token = val["giteaToken"].as_str().map(|s| s.to_string());
-    let gitea_password = val["giteaPassword"].as_str().map(|s| s.to_string());
-
-    // Derive Gitea external URL from coordination server host + Gitea port
-    let gitea_url = val["giteaUrl"].as_str().map(|server_gitea_url| {
-        let coord_host = coordination
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split(':')
-            .next()
-            .unwrap_or("127.0.0.1");
-        let gitea_port = server_gitea_url
-            .split(':')
-            .next_back()
-            .unwrap_or("3000")
-            .trim_end_matches('/');
-        format!("http://{}:{}", coord_host, gitea_port)
-    });
-
-    if gitea_user.is_some() {
-        println!("Gitea account: {}", gitea_user.as_deref().unwrap_or("?"));
-        if let Some(ref url) = gitea_url {
-            println!(
-                "Gitea URL: {} (credentials saved to ~/.bridges/config.json)",
-                url
-            );
-        }
-    } else {
-        eprintln!(
-            "Warning: server did not provide Gitea credentials. Coordination works, but repo sync will not."
-        );
-        eprintln!(
-            "Check the server logs for 'Gitea setup failed', 'Gitea integration: disabled', or 'Gitea account creation failed'."
-        );
-    }
-
     let cfg = ClientConfig {
         coordination: coordination.to_string(),
         node_id: node_id.clone(),
         api_key,
         display_name: Some(name.to_string()),
         owner: None,
-        gitea_url,
-        gitea_user,
-        gitea_token,
-        gitea_password,
     };
     cfg.save();
     println!("Registered as {}", node_id);
@@ -214,8 +173,6 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
         "slug": name,
         "displayName": name,
         "description": description,
-        "giteaOwner": cfg.gitea_user,
-        "giteaRepo": name,
     });
     let url = format!("{}/v1/projects", cfg.coordination);
     let resp = send_or_exit(&client, &url, Some(&body), "POST");
@@ -248,39 +205,6 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
         eprintln!("  git init failed: {}", e);
     }
     crate::sync_engine::git_commit(&project_dir, "init project").ok();
-
-    // Create Gitea repo under user's account and set remote
-    if let (Some(gitea_url), Some(gitea_token), Some(gitea_user)) =
-        (&cfg.gitea_url, &cfg.gitea_token, &cfg.gitea_user)
-    {
-        if let Err(e) = crate::sync_engine::gitea_create_user_repo(gitea_url, gitea_token, name) {
-            eprintln!("  Gitea repo creation failed: {}", e);
-        }
-        // Remote URL stays clean; git auth is injected per command.
-        let remote_url = format!(
-            "http://{host}/{gitea_user}/{repo}.git",
-            gitea_user = gitea_user,
-            host = gitea_url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://"),
-            repo = name,
-        );
-        if let Err(e) = crate::sync_engine::git_add_remote(&project_dir, &remote_url) {
-            eprintln!("  Git remote setup failed: {}", e);
-        }
-        let branch = crate::sync_engine::git_current_branch(&project_dir);
-        if let Err(e) = crate::sync_engine::git_push(&project_dir, &branch) {
-            eprintln!("  Git push failed: {}", e);
-        } else {
-            println!("  gitea: {}/{}/{}", gitea_url, gitea_user, name);
-        }
-    } else {
-        eprintln!("  Gitea not configured — this client has no Gitea credentials.");
-        eprintln!("  Run `bridges setup` after verifying the server started with Gitea enabled.");
-        eprintln!(
-            "  If setup still omits Gitea info, check the server logs for 'Gitea setup failed' or 'Gitea integration: disabled'."
-        );
-    }
 
     // Store in local DB with path
     let conn = crate::db::open_db();
@@ -347,52 +271,14 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
         std::process::exit(1);
     }
 
-    // Fetch project details to get the slug and owner
+    // Fetch project details to get the slug.
     let details_url = format!("{}/v1/projects/{}", cfg.coordination, project_id);
-    let (slug, owner_node_id, repo_owner, repo_name) = match client.get(&details_url).send() {
+    let slug = match client.get(&details_url).send() {
         Ok(resp) if resp.status().is_success() => {
             let val: serde_json::Value = resp.json().unwrap_or_default();
-            let s = val["slug"].as_str().unwrap_or(project_id).to_string();
-            let o = val["createdBy"].as_str().unwrap_or("").to_string();
-            let repo_owner = val["giteaOwner"].as_str().unwrap_or("").to_string();
-            let repo_name = val["giteaRepo"].as_str().unwrap_or(&s).to_string();
-            (s, o, repo_owner, repo_name)
+            val["slug"].as_str().unwrap_or(project_id).to_string()
         }
-        _ => (
-            project_id.replace("proj_", ""),
-            String::new(),
-            String::new(),
-            String::new(),
-        ),
-    };
-
-    // Get owner's display name (Gitea username) from members list
-    let owner_gitea_user = if !repo_owner.is_empty() {
-        repo_owner
-    } else if !owner_node_id.is_empty() {
-        let members_url = format!("{}/v1/projects/{}/members", cfg.coordination, project_id);
-        client
-            .get(&members_url)
-            .send()
-            .ok()
-            .and_then(|r| r.json::<Vec<serde_json::Value>>().ok())
-            .and_then(|members| {
-                members
-                    .iter()
-                    .find(|m| m["nodeId"].as_str() == Some(&owner_node_id))
-                    .and_then(|m| m["displayName"].as_str())
-                    .map(|n| {
-                        n.to_lowercase()
-                            .replace(' ', "-")
-                            .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == '-')
-                            .take(20)
-                            .collect::<String>()
-                    })
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
+        _ => project_id.replace("proj_", ""),
     };
 
     // Check if project directory already exists locally
@@ -407,49 +293,11 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
         dir
     };
 
-    // Try to clone from Gitea (gets all owner's files directly)
-    let mut cloned = false;
-    if let (Some(gitea_url), Some(_gitea_token), Some(gitea_user)) =
-        (&cfg.gitea_url, &cfg.gitea_token, &cfg.gitea_user)
-    {
-        // Use owner's Gitea username for repo path, fallback to slug
-        let repo_owner = if !owner_gitea_user.is_empty() {
-            &owner_gitea_user
-        } else {
-            gitea_user
-        };
-        let repo_name = if !repo_name.is_empty() {
-            &repo_name
-        } else {
-            &slug
-        };
-        let remote_url = format!(
-            "http://{host}/{repo_owner}/{repo_name}.git",
-            host = gitea_url
-                .trim_start_matches("http://")
-                .trim_start_matches("https://"),
-            repo_owner = repo_owner,
-            repo_name = repo_name,
-        );
-        match crate::sync_engine::git_clone(&remote_url, &project_dir) {
-            Ok(()) => {
-                println!("  Cloned project from Gitea");
-                cloned = true;
-            }
-            Err(e) => {
-                eprintln!("  Clone failed: {} (initializing fresh)", e);
-            }
-        }
+    if let Err(e) = crate::sync_engine::git_init(&project_dir) {
+        eprintln!("  git init failed: {}", e);
     }
 
-    // If clone failed, init fresh git repo
-    if !cloned {
-        if let Err(e) = crate::sync_engine::git_init(&project_dir) {
-            eprintln!("  git init failed: {}", e);
-        }
-    }
-
-    // Init .bridges/ and .shared/ (won't overwrite files from clone)
+    // Init .bridges/ and .shared/
     crate::workspace::init_workspace(&project_dir, &slug);
     crate::sync_engine::init_shared(&project_dir);
 
@@ -638,7 +486,7 @@ pub fn cmd_session_reset(project_id: &str, peer_id: &str, session_id: Option<&st
     );
 }
 
-/// Auto-sync .shared/ before communication commands. Uses git push/pull to Gitea.
+/// Auto-sync .shared/ before communication commands.
 fn auto_sync(_project_id: &str) {
     // Sync is now manual-only via `bridges sync`.
     // Auto-sync before ask/debate caused git conflicts and slowed down messaging.
@@ -867,42 +715,6 @@ fn parse_json_or_exit<T: serde::de::DeserializeOwned>(resp: reqwest::blocking::R
     }
 }
 
-// ── Gitea helpers ──
-
-/// Resolve Gitea API coordinates from a project ID.
-/// Returns (gitea_url, token, owner, repo_name).
-fn resolve_gitea_repo(project_id: &str) -> (String, String, String, String) {
-    require_project_id(project_id);
-    let cfg = ClientConfig::load_or_exit();
-    let gitea_url = cfg.gitea_url.unwrap_or_else(|| {
-        eprintln!("Gitea not configured. Run bridges setup first.");
-        std::process::exit(1);
-    });
-    let gitea_token = cfg.gitea_token.unwrap_or_else(|| {
-        eprintln!("Gitea token not found. Run bridges setup first.");
-        std::process::exit(1);
-    });
-
-    let project_dir = resolve_project_dir(project_id).unwrap_or_else(|| {
-        eprintln!("Project {} not found locally", project_id);
-        std::process::exit(1);
-    });
-
-    let (owner, repo) =
-        crate::sync_engine::git_get_remote_owner_repo(&project_dir).unwrap_or_else(|_| {
-            // Fallback: use gitea_user + project slug
-            let user = cfg.gitea_user.unwrap_or_default();
-            let conn = crate::db::open_db();
-            crate::db::init_db(&conn);
-            let slug = crate::queries::get_project_by_id(&conn, project_id)
-                .map(|p| p.slug)
-                .unwrap_or_else(|| project_id.replace("proj_", ""));
-            (user, slug)
-        });
-
-    (gitea_url, gitea_token, owner, repo)
-}
-
 fn require_project_id(project_id: &str) {
     if !project_id.starts_with("proj_") {
         eprintln!(
@@ -910,174 +722,5 @@ fn require_project_id(project_id: &str) {
             project_id
         );
         std::process::exit(1);
-    }
-}
-
-// ── Issue commands ──
-
-pub fn cmd_issue_create(title: &str, project_id: &str, body: Option<&str>, assign: Option<&str>) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    let assignees: Vec<&str> = assign
-        .map(|a| {
-            a.split(',')
-                .map(|s| s.trim().trim_start_matches('@'))
-                .collect()
-        })
-        .unwrap_or_default();
-    match crate::sync_engine::gitea_create_issue(
-        &url,
-        &token,
-        &owner,
-        &repo,
-        title,
-        body.unwrap_or(""),
-        &assignees,
-    ) {
-        Ok(num) => println!("Created issue #{}: {}", num, title),
-        Err(e) => eprintln!("Failed to create issue: {}", e),
-    }
-}
-
-pub fn cmd_issue_list(project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_list_issues(&url, &token, &owner, &repo) {
-        Ok(issues) => {
-            if issues.is_empty() {
-                println!("No open issues");
-                return;
-            }
-            for issue in &issues {
-                let num = issue["number"].as_u64().unwrap_or(0);
-                let title = issue["title"].as_str().unwrap_or("?");
-                let state = issue["state"].as_str().unwrap_or("?");
-                let assignees: Vec<&str> = issue["assignees"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|u| u["login"].as_str()).collect())
-                    .unwrap_or_default();
-                let assign_str = if assignees.is_empty() {
-                    String::new()
-                } else {
-                    format!(" → {}", assignees.join(", "))
-                };
-                println!("  #{} [{}] {}{}", num, state, title, assign_str);
-            }
-        }
-        Err(e) => eprintln!("Failed to list issues: {}", e),
-    }
-}
-
-pub fn cmd_issue_show(number: u64, project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_get_issue(&url, &token, &owner, &repo, number) {
-        Ok(issue) => {
-            let title = issue["title"].as_str().unwrap_or("?");
-            let state = issue["state"].as_str().unwrap_or("?");
-            let body = issue["body"].as_str().unwrap_or("");
-            let user = issue["user"]["login"].as_str().unwrap_or("?");
-            println!("#{} [{}] {}", number, state, title);
-            println!("  by {}", user);
-            if !body.is_empty() {
-                println!("\n{}", body);
-            }
-        }
-        Err(e) => eprintln!("Failed to get issue: {}", e),
-    }
-}
-
-pub fn cmd_issue_comment(number: u64, text: &str, project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_comment_issue(&url, &token, &owner, &repo, number, text) {
-        Ok(()) => println!("Comment added to issue #{}", number),
-        Err(e) => eprintln!("Failed to comment: {}", e),
-    }
-}
-
-pub fn cmd_issue_close(number: u64, project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_close_issue(&url, &token, &owner, &repo, number) {
-        Ok(()) => println!("Issue #{} closed", number),
-        Err(e) => eprintln!("Failed to close issue: {}", e),
-    }
-}
-
-// ── Milestone commands ──
-
-pub fn cmd_milestone_create(title: &str, project_id: &str, due: Option<&str>) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_create_milestone(&url, &token, &owner, &repo, title, due) {
-        Ok(id) => {
-            let due_str = due.map(|d| format!(" (due {})", d)).unwrap_or_default();
-            println!("Created milestone #{}: {}{}", id, title, due_str);
-        }
-        Err(e) => eprintln!("Failed to create milestone: {}", e),
-    }
-}
-
-pub fn cmd_milestone_list(project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_list_milestones(&url, &token, &owner, &repo) {
-        Ok(milestones) => {
-            if milestones.is_empty() {
-                println!("No milestones");
-                return;
-            }
-            for m in &milestones {
-                let title = m["title"].as_str().unwrap_or("?");
-                let state = m["state"].as_str().unwrap_or("?");
-                let due = m["due_on"].as_str().unwrap_or("no due date");
-                let open = m["open_issues"].as_u64().unwrap_or(0);
-                let closed = m["closed_issues"].as_u64().unwrap_or(0);
-                println!(
-                    "  {} [{}] {}/{} issues — due {}",
-                    title,
-                    state,
-                    closed,
-                    open + closed,
-                    due
-                );
-            }
-        }
-        Err(e) => eprintln!("Failed to list milestones: {}", e),
-    }
-}
-
-// ── PR commands ──
-
-pub fn cmd_pr_create(title: &str, project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    let project_dir = resolve_project_dir(project_id).unwrap_or_else(|| {
-        eprintln!("Project not found locally");
-        std::process::exit(1);
-    });
-    let branch = crate::sync_engine::git_current_branch(&project_dir);
-    if branch == "main" {
-        eprintln!("Cannot create PR from main. Create a feature branch first.");
-        std::process::exit(1);
-    }
-    // Push the branch first
-    crate::sync_engine::git_push(&project_dir, &branch).ok();
-    match crate::sync_engine::gitea_create_pr(&url, &token, &owner, &repo, title, &branch, "main") {
-        Ok(num) => println!("Created PR #{}: {} ({} → main)", num, title, branch),
-        Err(e) => eprintln!("Failed to create PR: {}", e),
-    }
-}
-
-pub fn cmd_pr_list(project_id: &str) {
-    let (url, token, owner, repo) = resolve_gitea_repo(project_id);
-    match crate::sync_engine::gitea_list_prs(&url, &token, &owner, &repo) {
-        Ok(prs) => {
-            if prs.is_empty() {
-                println!("No open pull requests");
-                return;
-            }
-            for pr in &prs {
-                let num = pr["number"].as_u64().unwrap_or(0);
-                let title = pr["title"].as_str().unwrap_or("?");
-                let head = pr["head"]["label"].as_str().unwrap_or("?");
-                let base = pr["base"]["label"].as_str().unwrap_or("main");
-                println!("  PR #{} {} → {} — {}", num, head, base, title);
-            }
-        }
-        Err(e) => eprintln!("Failed to list PRs: {}", e),
     }
 }

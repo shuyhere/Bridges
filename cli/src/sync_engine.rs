@@ -1,9 +1,8 @@
-//! Sync engine — git-based worktree sync via Gitea.
+//! Sync engine — git-based worktree sync via a project remote.
 //!
 //! Each project is a real git repo. Sync = git add/commit/push/pull.
-//! Gitea on the server hosts the remote. Conflicts handled by git natively.
+//! Conflicts are handled by git natively.
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -43,84 +42,6 @@ pub fn git_init(project_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Clone an existing Gitea repo into the project directory.
-/// Clones to a temp dir first, then moves into place (never deletes project_dir).
-pub fn git_clone(remote_url: &str, project_dir: &Path) -> Result<(), String> {
-    if project_dir_has_user_content(project_dir)? {
-        return Err(format!(
-            "refusing to clone into non-empty project dir {}",
-            project_dir.display()
-        ));
-    }
-
-    let temp_dir = project_dir.with_extension("clone-tmp");
-    // Clean up any leftover temp dir
-    fs::remove_dir_all(&temp_dir).ok();
-
-    // Clone to temp dir
-    let output = run_git_command(
-        None,
-        &["clone", remote_url, &temp_dir.to_string_lossy()],
-        auth_header_for_remote(remote_url).as_deref(),
-    )
-    .map_err(|e| format!("git clone: {}", e))?;
-
-    if !output.status.success() {
-        fs::remove_dir_all(&temp_dir).ok();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
-    }
-
-    // Move cloned .git/ and files into project_dir
-    fs::create_dir_all(project_dir).ok();
-
-    // Move .git/ from temp to project
-    let temp_git = temp_dir.join(".git");
-    let dest_git = project_dir.join(".git");
-    if temp_git.exists() {
-        if dest_git.exists() {
-            fs::remove_dir_all(&dest_git).ok();
-        }
-        fs::rename(&temp_git, &dest_git).map_err(|e| format!("move .git: {}", e))?;
-    }
-
-    // Copy all files from temp to project (don't overwrite .bridges/)
-    copy_dir_contents(&temp_dir, project_dir)?;
-
-    // Clean up temp
-    fs::remove_dir_all(&temp_dir).ok();
-
-    // Set tracking branch
-    run_git(
-        project_dir,
-        &["branch", "--set-upstream-to=origin/main", "main"],
-    )
-    .ok();
-
-    Ok(())
-}
-
-/// Copy directory contents from src to dst (skip .git/ and .bridges/).
-fn copy_dir_contents(src: &Path, dst: &Path) -> Result<(), String> {
-    let entries = fs::read_dir(src).map_err(|e| format!("read dir: {}", e))?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str == ".git" || name_str == ".bridges" {
-            continue;
-        }
-        let src_path = entry.path();
-        let dst_path = dst.join(&name);
-        if src_path.is_dir() {
-            fs::create_dir_all(&dst_path).ok();
-            copy_dir_contents(&src_path, &dst_path)?;
-        } else if !dst_path.exists() {
-            fs::copy(&src_path, &dst_path).ok();
-        }
-    }
-    Ok(())
-}
-
 /// Stage and commit .shared/ changes.
 pub fn git_commit(project_dir: &Path, message: &str) -> Result<bool, String> {
     ensure_gitignore(project_dir);
@@ -143,13 +64,13 @@ fn ensure_gitignore(project_dir: &Path) {
     }
 }
 
-/// Push to Gitea remote.
+/// Push to the configured git remote.
 pub fn git_push(project_dir: &Path, branch: &str) -> Result<(), String> {
     run_git_remote(project_dir, &["push", "origin", branch])?;
     Ok(())
 }
 
-/// Pull from Gitea remote and merge.
+/// Pull from the configured git remote and merge.
 pub fn git_pull(
     project_dir: &Path,
     node_id: &str,
@@ -361,14 +282,6 @@ pub fn git_pull(
     })
 }
 
-/// Add Gitea as remote.
-pub fn git_add_remote(project_dir: &Path, gitea_url: &str) -> Result<(), String> {
-    // Remove existing remote if any
-    let _ = run_git(project_dir, &["remote", "remove", "origin"]);
-    run_git(project_dir, &["remote", "add", "origin", gitea_url])?;
-    Ok(())
-}
-
 /// Get the current branch name.
 pub fn git_current_branch(project_dir: &Path) -> String {
     run_git(project_dir, &["branch", "--show-current"])
@@ -422,7 +335,7 @@ pub fn sync_project(
         }
     };
 
-    // 2. Push to Gitea
+    // 2. Push to the configured git remote
     if pushed {
         let branch = git_current_branch(project_dir);
         if let Err(e) = git_push(project_dir, &branch) {
@@ -430,7 +343,7 @@ pub fn sync_project(
         }
     }
 
-    // 3. Pull from Gitea + merge
+    // 3. Pull from the configured git remote + merge
     let pull_result = git_pull(project_dir, node_id, approve_unmanaged)?;
     warnings.extend(pull_result.warnings.clone());
 
@@ -489,6 +402,7 @@ fn clear_sync_approval(project_dir: &Path) {
     fs::remove_file(approval_path(project_dir)).ok();
 }
 
+#[cfg(test)]
 fn project_dir_has_user_content(project_dir: &Path) -> Result<bool, String> {
     if !project_dir.exists() {
         return Ok(false);
@@ -608,47 +522,8 @@ fn run_git(project_dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn normalize_remote_authority(url: &str) -> Option<String> {
-    let trimmed = url
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let without_userinfo = trimmed
-        .rsplit_once('@')
-        .map(|(_, rest)| rest)
-        .unwrap_or(trimmed);
-    let authority = without_userinfo.split('/').next()?.trim();
-    if authority.is_empty() {
-        None
-    } else {
-        Some(authority.to_string())
-    }
-}
-
-fn auth_header_for_remote(remote_url: &str) -> Option<String> {
-    let cfg = crate::client_config::ClientConfig::load()?;
-    let gitea_url = cfg.gitea_url?;
-    let gitea_user = cfg.gitea_user?;
-    let gitea_token = cfg.gitea_token?;
-    let remote_authority = normalize_remote_authority(remote_url)?;
-    let gitea_authority = normalize_remote_authority(&gitea_url)?;
-    if remote_authority != gitea_authority {
-        return None;
-    }
-    let creds = format!("{}:{}", gitea_user, gitea_token);
-    Some(format!(
-        "AUTHORIZATION: Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(creds)
-    ))
-}
-
 fn run_git_remote(project_dir: &Path, args: &[&str]) -> Result<String, String> {
-    let remote_url = run_git(project_dir, &["remote", "get-url", "origin"]).unwrap_or_default();
-    let output = run_git_command(
-        Some(project_dir),
-        args,
-        auth_header_for_remote(remote_url.trim()).as_deref(),
-    )?;
+    let output = run_git_command(Some(project_dir), args, None)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -658,298 +533,6 @@ fn run_git_remote(project_dir: &Path, args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-// ── Gitea API helpers ──
-
-/// Create a Gitea repo under the authenticated user's account (not an org).
-/// URL will be: http://gitea:3000/{username}/{repo_name}
-pub fn gitea_create_user_repo(gitea_url: &str, token: &str, repo_name: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({
-        "name": repo_name,
-        "private": false,
-        "auto_init": false,
-    });
-    let resp = client
-        .post(format!("{}/api/v1/user/repos", gitea_url))
-        .header("Authorization", format!("token {}", token))
-        .json(&body)
-        .send()
-        .map_err(|e| format!("gitea create repo: {}", e))?;
-    if !resp.status().is_success() && resp.status().as_u16() != 409 {
-        let status = resp.status();
-        let text = resp.text().unwrap_or_default();
-        return Err(format!("gitea create repo HTTP {} — {}", status, text));
-    }
-    Ok(())
-}
-
-/// Create a Gitea issue.
-pub fn gitea_create_issue(
-    gitea_url: &str,
-    token: &str,
-    org: &str,
-    repo: &str,
-    title: &str,
-    body: &str,
-    assignees: &[&str],
-) -> Result<u64, String> {
-    let client = reqwest::blocking::Client::new();
-    let req_body = serde_json::json!({
-        "title": title,
-        "body": body,
-        "assignees": assignees,
-    });
-    let resp = client
-        .post(format!(
-            "{}/api/v1/repos/{}/{}/issues",
-            gitea_url, org, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .json(&req_body)
-        .send()
-        .map_err(|e| format!("gitea create issue: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea create issue HTTP {}", resp.status()));
-    }
-    let val: serde_json::Value = resp.json().unwrap_or_default();
-    Ok(val["number"].as_u64().unwrap_or(0))
-}
-
-/// List Gitea issues.
-pub fn gitea_list_issues(
-    gitea_url: &str,
-    token: &str,
-    org: &str,
-    repo: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!(
-            "{}/api/v1/repos/{}/{}/issues?state=open",
-            gitea_url, org, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .map_err(|e| format!("gitea list issues: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea list issues HTTP {}", resp.status()));
-    }
-    resp.json().map_err(|e| format!("parse issues: {}", e))
-}
-
-/// Add comment to Gitea issue.
-pub fn gitea_comment_issue(
-    gitea_url: &str,
-    token: &str,
-    org: &str,
-    repo: &str,
-    issue_num: u64,
-    body: &str,
-) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
-    let req_body = serde_json::json!({ "body": body });
-    let resp = client
-        .post(format!(
-            "{}/api/v1/repos/{}/{}/issues/{}/comments",
-            gitea_url, org, repo, issue_num
-        ))
-        .header("Authorization", format!("token {}", token))
-        .json(&req_body)
-        .send()
-        .map_err(|e| format!("gitea comment: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea comment HTTP {}", resp.status()));
-    }
-    Ok(())
-}
-
-/// Get a single Gitea issue by number.
-pub fn gitea_get_issue(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> Result<serde_json::Value, String> {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!(
-            "{}/api/v1/repos/{}/{}/issues/{}",
-            gitea_url, owner, repo, number
-        ))
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .map_err(|e| format!("gitea get issue: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea get issue HTTP {}", resp.status()));
-    }
-    resp.json().map_err(|e| format!("parse issue: {}", e))
-}
-
-/// Close a Gitea issue.
-pub fn gitea_close_issue(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({ "state": "closed" });
-    let resp = client
-        .patch(format!(
-            "{}/api/v1/repos/{}/{}/issues/{}",
-            gitea_url, owner, repo, number
-        ))
-        .header("Authorization", format!("token {}", token))
-        .json(&body)
-        .send()
-        .map_err(|e| format!("gitea close issue: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea close issue HTTP {}", resp.status()));
-    }
-    Ok(())
-}
-
-/// Create a Gitea milestone.
-pub fn gitea_create_milestone(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    title: &str,
-    due: Option<&str>,
-) -> Result<u64, String> {
-    let client = reqwest::blocking::Client::new();
-    let mut body = serde_json::json!({ "title": title });
-    if let Some(d) = due {
-        // Convert YYYY-MM-DD to RFC3339
-        body["due_on"] = serde_json::Value::String(format!("{}T00:00:00Z", d));
-    }
-    let resp = client
-        .post(format!(
-            "{}/api/v1/repos/{}/{}/milestones",
-            gitea_url, owner, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .json(&body)
-        .send()
-        .map_err(|e| format!("gitea create milestone: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea create milestone HTTP {}", resp.status()));
-    }
-    let val: serde_json::Value = resp.json().unwrap_or_default();
-    Ok(val["id"].as_u64().unwrap_or(0))
-}
-
-/// List Gitea milestones.
-pub fn gitea_list_milestones(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!(
-            "{}/api/v1/repos/{}/{}/milestones",
-            gitea_url, owner, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .map_err(|e| format!("gitea list milestones: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea list milestones HTTP {}", resp.status()));
-    }
-    resp.json().map_err(|e| format!("parse milestones: {}", e))
-}
-
-/// Create a Gitea pull request.
-pub fn gitea_create_pr(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    title: &str,
-    head: &str,
-    base: &str,
-) -> Result<u64, String> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({
-        "title": title,
-        "head": head,
-        "base": base,
-    });
-    let resp = client
-        .post(format!(
-            "{}/api/v1/repos/{}/{}/pulls",
-            gitea_url, owner, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .json(&body)
-        .send()
-        .map_err(|e| format!("gitea create pr: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea create pr HTTP {}", resp.status()));
-    }
-    let val: serde_json::Value = resp.json().unwrap_or_default();
-    Ok(val["number"].as_u64().unwrap_or(0))
-}
-
-/// List Gitea pull requests.
-pub fn gitea_list_prs(
-    gitea_url: &str,
-    token: &str,
-    owner: &str,
-    repo: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let client = reqwest::blocking::Client::new();
-    let resp = client
-        .get(format!(
-            "{}/api/v1/repos/{}/{}/pulls?state=open",
-            gitea_url, owner, repo
-        ))
-        .header("Authorization", format!("token {}", token))
-        .send()
-        .map_err(|e| format!("gitea list prs: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("gitea list prs HTTP {}", resp.status()));
-    }
-    resp.json().map_err(|e| format!("parse prs: {}", e))
-}
-
-/// Parse git remote URL to extract owner and repo name.
-/// Supports clean URLs and legacy credential-bearing URLs.
-pub fn git_get_remote_owner_repo(project_dir: &Path) -> Result<(String, String), String> {
-    let url = run_git(project_dir, &["remote", "get-url", "origin"])?;
-    let url = url.trim();
-    // Parse: skip scheme + optional credentials, get path segments
-    let path = if let Some(at_pos) = url.find('@') {
-        // Legacy credential-bearing URL → /owner/repo.git
-        let after_at = &url[at_pos + 1..];
-        after_at.find('/').map(|i| &after_at[i..]).unwrap_or("")
-    } else {
-        // http://host/owner/repo.git
-        let after_scheme = url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        after_scheme
-            .find('/')
-            .map(|i| &after_scheme[i..])
-            .unwrap_or("")
-    };
-    let parts: Vec<&str> = path
-        .trim_matches('/')
-        .trim_end_matches(".git")
-        .split('/')
-        .collect();
-    if parts.len() >= 2 {
-        Ok((parts[0].to_string(), parts[1].to_string()))
-    } else {
-        Err(format!("cannot parse owner/repo from remote URL: {}", url))
-    }
 }
 
 #[cfg(test)]
