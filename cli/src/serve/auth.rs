@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::ServerState;
 
-/// Extension: authenticated node (from node API key or externally provisioned user token).
+/// Extension: authenticated node (from a node API key).
 #[derive(Clone, Debug)]
 pub struct AuthNode(pub String);
 
@@ -78,15 +78,11 @@ pub fn routes(state: Arc<ServerState>) -> Router {
 
 async fn register(
     State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, StatusCode> {
     let api_key = generate_api_key();
     let key_hash = hash_api_key(&api_key);
     let now = chrono::Utc::now().to_rfc3339();
-
-    // If the caller supplied an externally provisioned user token, link this node to that user.
-    let user_id = resolve_user_from_bearer(&state, &headers).await;
 
     let (gitea_url, gitea_user, gitea_token, gitea_password) = if let Some(ref gitea) = state.gitea
     {
@@ -110,8 +106,8 @@ async fn register(
     let db = state.db.lock().await;
     db.execute(
         "INSERT OR REPLACE INTO registered_nodes \
-         (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, gitea_user, api_key_hash, user_id, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, gitea_user, api_key_hash, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             req.node_id,
             req.ed25519_pubkey,
@@ -120,7 +116,6 @@ async fn register(
             req.owner_name,
             gitea_user,
             key_hash,
-            user_id,
             now,
         ],
     )
@@ -260,8 +255,7 @@ async fn refresh(
     }))
 }
 
-/// Middleware: verify Bearer token against `registered_nodes.api_key_hash`
-/// or an externally provisioned `user_tokens.token_hash`, then inject `AuthNode`.
+/// Middleware: verify Bearer token against `registered_nodes.api_key_hash` and inject `AuthNode`.
 pub async fn auth_middleware(
     State(state): State<Arc<ServerState>>,
     mut req: Request,
@@ -274,12 +268,11 @@ pub async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     let token = match token {
-        Some(t) => t.to_string(),
+        Some(t) => t,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    let token_hash = hash_api_key(&token);
-
+    let token_hash = hash_api_key(token);
     let db = state.db.lock().await;
     let node_id: Option<String> = db
         .query_row(
@@ -288,38 +281,14 @@ pub async fn auth_middleware(
             |row| row.get(0),
         )
         .ok();
-
-    if let Some(id) = node_id {
-        drop(db);
-        req.extensions_mut().insert(AuthNode(id));
-        return next.run(req).await;
-    }
-
-    let user_node: Option<String> = db
-        .query_row(
-            "SELECT rn.node_id FROM user_tokens ut \
-             JOIN registered_nodes rn ON rn.user_id = ut.user_id \
-             WHERE ut.token_hash = ?1 \
-             AND (ut.expires_at IS NULL OR ut.expires_at > ?2) \
-             LIMIT 1",
-            rusqlite::params![token_hash, chrono::Utc::now().to_rfc3339()],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(node_id) = user_node {
-        db.execute(
-            "UPDATE user_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
-            rusqlite::params![chrono::Utc::now().to_rfc3339(), token_hash],
-        )
-        .ok();
-        drop(db);
-        req.extensions_mut().insert(AuthNode(node_id));
-        return next.run(req).await;
-    }
-
     drop(db);
-    StatusCode::UNAUTHORIZED.into_response()
+
+    let Some(node_id) = node_id else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    req.extensions_mut().insert(AuthNode(node_id));
+    next.run(req).await
 }
 
 /// Helper to extract node_id from Bearer token in headers.
@@ -331,39 +300,9 @@ pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option
     let token_hash = hash_api_key(token);
     let db = state.db.lock().await;
 
-    if let Ok(node_id) = db.query_row(
+    db.query_row(
         "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1",
         rusqlite::params![token_hash],
-        |row| row.get::<_, String>(0),
-    ) {
-        return Some(node_id);
-    }
-
-    db.query_row(
-        "SELECT rn.node_id FROM user_tokens ut \
-         JOIN registered_nodes rn ON rn.user_id = ut.user_id \
-         WHERE ut.token_hash = ?1 \
-         AND (ut.expires_at IS NULL OR ut.expires_at > ?2) \
-         LIMIT 1",
-        rusqlite::params![token_hash, chrono::Utc::now().to_rfc3339()],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-/// Resolve a user_id from an externally provisioned Bearer token.
-async fn resolve_user_from_bearer(state: &ServerState, headers: &HeaderMap) -> Option<String> {
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))?;
-
-    let token_hash = hash_api_key(token);
-    let db = state.db.lock().await;
-    db.query_row(
-        "SELECT user_id FROM user_tokens WHERE token_hash = ?1 \
-         AND (expires_at IS NULL OR expires_at > ?2)",
-        rusqlite::params![token_hash, chrono::Utc::now().to_rfc3339()],
         |row| row.get(0),
     )
     .ok()

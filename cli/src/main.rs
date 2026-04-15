@@ -62,9 +62,6 @@ enum Commands {
         /// Coordination server URL
         #[arg(long, default_value = "http://127.0.0.1:17080")]
         coordination: String,
-        /// API token for token-based registration
-        #[arg(long)]
-        token: Option<String>,
         /// Runtime type (claude-code, codex, openclaw, generic)
         #[arg(long, default_value = "claude-code")]
         runtime: String,
@@ -169,11 +166,6 @@ enum Commands {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// Manage your contacts
-    Contact {
-        #[command(subcommand)]
-        action: ContactAction,
-    },
     /// Broadcast a message to all project members
     Broadcast {
         /// Message text
@@ -269,25 +261,6 @@ enum PrAction {
 }
 
 #[derive(Subcommand)]
-enum ContactAction {
-    /// Add a contact by node ID
-    Add {
-        /// Node ID to add (kd_xxx)
-        node_id: String,
-        /// Display name for this contact
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// List your contacts
-    List,
-    /// Remove a contact
-    Remove {
-        /// Node ID to remove
-        node_id: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum ServiceAction {
     Install,
     Uninstall,
@@ -362,18 +335,11 @@ fn main() {
         }
         Commands::Setup {
             coordination,
-            token,
             runtime,
             endpoint,
             name,
         } => {
-            commands::cmd_setup(
-                &coordination,
-                token.as_deref(),
-                &runtime,
-                &endpoint,
-                name.as_deref(),
-            );
+            commands::cmd_setup(&coordination, &runtime, &endpoint, name.as_deref());
         }
         Commands::Create { name, description } => {
             commands::cmd_create(&name, description.as_deref());
@@ -403,17 +369,6 @@ fn main() {
             };
             commands::cmd_ask(&node_id, &question, proj, new_session);
         }
-        Commands::Contact { action } => match action {
-            ContactAction::Add { node_id, name } => {
-                commands::cmd_contact_add(&node_id, name.as_deref());
-            }
-            ContactAction::List => {
-                commands::cmd_contact_list();
-            }
-            ContactAction::Remove { node_id } => {
-                commands::cmd_contact_remove(&node_id);
-            }
-        },
         Commands::Debate {
             topic,
             project,

@@ -63,37 +63,14 @@ async fn get_keys(
         )
         .is_ok()
     } else {
-        // Allow if they share any project
-        let shares_project = db
-            .query_row(
-                "SELECT 1 FROM server_members m1 \
-                 JOIN server_members m2 ON m1.project_id = m2.project_id \
-                 WHERE m1.node_id = ?1 AND m2.node_id = ?2 LIMIT 1",
-                rusqlite::params![auth.0, node_id],
-                |_| Ok(()),
-            )
-            .is_ok();
-        if shares_project {
-            true
-        } else {
-            // Also allow if target is in caller's contacts
-            let user_id: Option<String> = db
-                .query_row(
-                    "SELECT user_id FROM registered_nodes WHERE node_id = ?1",
-                    rusqlite::params![auth.0],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            user_id.is_some_and(|uid| {
-                db.query_row(
-                    "SELECT 1 FROM user_contacts WHERE user_id = ?1 AND contact_node_id = ?2",
-                    rusqlite::params![uid, node_id],
-                    |_| Ok(()),
-                )
-                .is_ok()
-            })
-        }
+        db.query_row(
+            "SELECT 1 FROM server_members m1 \
+             JOIN server_members m2 ON m1.project_id = m2.project_id \
+             WHERE m1.node_id = ?1 AND m2.node_id = ?2 LIMIT 1",
+            rusqlite::params![auth.0, node_id],
+            |_| Ok(()),
+        )
+        .is_ok()
     };
     if !allowed {
         return Err(StatusCode::FORBIDDEN);

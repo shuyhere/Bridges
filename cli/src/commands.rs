@@ -55,13 +55,7 @@ pub fn ensure_daemon() {
 }
 
 /// One-command setup: generate keys, register, configure, start daemon.
-pub fn cmd_setup(
-    coordination: &str,
-    token: Option<&str>,
-    runtime: &str,
-    endpoint: &str,
-    name: Option<&str>,
-) {
+pub fn cmd_setup(coordination: &str, runtime: &str, endpoint: &str, name: Option<&str>) {
     println!("=== Bridges Setup ===\n");
 
     // Derive display name: --name flag > system username > node_id
@@ -77,15 +71,8 @@ pub fn cmd_setup(
         println!("Name: {}", dn);
     }
 
-    if let Some(api_token) = token {
-        // Token-based setup: use a coordination-service API token
-        println!("\nRegistering node with API token...");
-        cmd_register_with_token(coordination, api_token, display_name.as_deref());
-    } else {
-        // Legacy setup: register directly (creates a new node-level API key)
-        println!("\nRegistering with {}...", coordination);
-        cmd_register(coordination, display_name.as_deref());
-    }
+    println!("\nRegistering with {}...", coordination);
+    cmd_register(coordination, display_name.as_deref());
 
     let cfg = DaemonConfig {
         coordination_url: coordination.to_string(),
@@ -121,95 +108,6 @@ pub fn cmd_setup(
     println!("  bridges create my-project         # create a project");
     println!("  bridges invite -p <id>            # invite collaborators");
     println!("  bridges ask <node> \"hi\" -p <id>  # talk to a peer");
-}
-
-/// Register a node using a coordination-service API token.
-/// The token is used as Bearer auth and may also become the node's API key.
-fn cmd_register_with_token(coordination: &str, api_token: &str, display_name: Option<&str>) {
-    let (_signing_key, verifying_key) = identity::load_or_create_keypair();
-    let node_id = identity::derive_node_id(&verifying_key);
-    let ed_pub = bs58::encode(verifying_key.as_bytes()).into_string();
-    let x_pub = hex::encode(
-        crate::crypto::ed25519_to_x25519_public(verifying_key.as_bytes())
-            .expect("own Ed25519 key must be valid"),
-    );
-
-    let name = display_name.unwrap_or(&node_id);
-
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({
-        "nodeId": node_id,
-        "ed25519Pubkey": ed_pub,
-        "x25519Pubkey": x_pub,
-        "displayName": name,
-    });
-
-    // Register node with the provided token as Bearer auth
-    let url = format!("{}/v1/auth/register", coordination.trim_end_matches('/'));
-    let resp = match client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_token))
-        .json(&body)
-        .send()
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to reach coordination server: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if !resp.status().is_success() {
-        eprintln!("Registration failed: HTTP {}", resp.status());
-        std::process::exit(1);
-    }
-
-    let val: serde_json::Value = parse_json_or_exit(resp);
-    // The server returns a fresh node-level API key
-    let node_api_key = match val["apiKey"].as_str() {
-        Some(k) => k.to_string(),
-        None => {
-            // If server didn't return an apiKey, use the provided token directly
-            api_token.to_string()
-        }
-    };
-
-    let gitea_user = val["giteaUser"].as_str().map(|s| s.to_string());
-    let gitea_token = val["giteaToken"].as_str().map(|s| s.to_string());
-    let gitea_password = val["giteaPassword"].as_str().map(|s| s.to_string());
-    let gitea_url = val["giteaUrl"].as_str().map(|server_gitea_url| {
-        let coord_host = coordination
-            .trim_start_matches("http://")
-            .trim_start_matches("https://")
-            .split(':')
-            .next()
-            .unwrap_or("127.0.0.1");
-        let gitea_port = server_gitea_url
-            .split(':')
-            .next_back()
-            .unwrap_or("3000")
-            .trim_end_matches('/');
-        format!("http://{}:{}", coord_host, gitea_port)
-    });
-
-    if gitea_user.is_some() {
-        println!("Gitea account: {}", gitea_user.as_deref().unwrap_or("?"));
-    }
-
-    let cfg = ClientConfig {
-        coordination: coordination.to_string(),
-        node_id: node_id.clone(),
-        api_key: node_api_key,
-        display_name: Some(name.to_string()),
-        owner: None,
-        gitea_url,
-        gitea_user,
-        gitea_token,
-        gitea_password,
-    };
-    cfg.save();
-    println!("Registered as {}", node_id);
-    println!("Config saved to ~/.bridges/config.json");
 }
 
 /// Register with a coordination server and save config.
@@ -915,83 +813,6 @@ pub fn cmd_publish(file: &str, project_id: &str) {
         "Published {} to project {} (E2E encrypted)",
         filename, project_id
     );
-}
-
-// ── Contact commands ──
-
-pub fn cmd_contact_add(node_id: &str, name: Option<&str>) {
-    let cfg = ClientConfig::load_or_exit();
-    let client = authed_client(&cfg);
-    let body = serde_json::json!({
-        "nodeId": node_id,
-        "displayName": name,
-    });
-    let url = format!("{}/v1/contacts", cfg.coordination);
-    let resp = send_or_exit(&client, &url, Some(&body), "POST");
-    if !resp.status().is_success() {
-        eprintln!("Failed to add contact: HTTP {}", resp.status());
-        std::process::exit(1);
-    }
-    let val: serde_json::Value = parse_json_or_exit(resp);
-    if val["ok"].as_bool() == Some(true) {
-        let display = name.unwrap_or(node_id);
-        println!("Added contact: {} ({})", display, node_id);
-    } else {
-        eprintln!(
-            "{}",
-            val["message"].as_str().unwrap_or("Failed to add contact")
-        );
-        std::process::exit(1);
-    }
-}
-
-pub fn cmd_contact_list() {
-    let cfg = ClientConfig::load_or_exit();
-    let client = authed_client(&cfg);
-    let url = format!("{}/v1/contacts", cfg.coordination);
-    let resp = send_or_exit(&client, &url, None, "GET");
-    if !resp.status().is_success() {
-        eprintln!("Failed to list contacts: HTTP {}", resp.status());
-        std::process::exit(1);
-    }
-    let contacts: Vec<serde_json::Value> = parse_json_or_exit(resp);
-    if contacts.is_empty() {
-        println!("No contacts yet. Add one with: bridges contact add <node_id>");
-        return;
-    }
-    println!("Contacts:");
-    for c in &contacts {
-        let nid = c["nodeId"].as_str().unwrap_or("?");
-        let name = c["displayName"]
-            .as_str()
-            .or(c["registeredName"].as_str())
-            .unwrap_or("");
-        if name.is_empty() {
-            println!("  {}", nid);
-        } else {
-            println!("  {} ({})", nid, name);
-        }
-    }
-}
-
-pub fn cmd_contact_remove(node_id: &str) {
-    let cfg = ClientConfig::load_or_exit();
-    let client = authed_client(&cfg);
-    let url = format!("{}/v1/contacts/{}", cfg.coordination, node_id);
-    let resp = match client.delete(&url).send() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Request failed: {}", e);
-            std::process::exit(1);
-        }
-    };
-    if resp.status().is_success() {
-        println!("Removed contact: {}", node_id);
-    } else if resp.status().as_u16() == 404 {
-        eprintln!("Contact {} not found", node_id);
-    } else {
-        eprintln!("Failed: HTTP {}", resp.status());
-    }
 }
 
 /// Build a blocking reqwest client with Bearer auth.

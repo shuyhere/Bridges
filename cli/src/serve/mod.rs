@@ -1,5 +1,4 @@
 pub mod auth;
-pub mod contacts;
 pub mod endpoints;
 pub mod invites;
 pub mod keys;
@@ -36,10 +35,14 @@ pub struct ServerState {
 pub fn init_server_db(conn: &Connection) {
     conn.execute_batch(SERVER_SCHEMA)
         .expect("failed to init server schema");
+
     add_column_if_missing(conn, "registered_nodes", "gitea_user", "TEXT");
-    add_column_if_missing(conn, "registered_nodes", "user_id", "TEXT");
+    add_column_if_missing(conn, "registered_nodes", "endpoint_hints", "TEXT");
     add_column_if_missing(conn, "server_projects", "gitea_owner", "TEXT");
     add_column_if_missing(conn, "server_projects", "gitea_repo", "TEXT");
+
+    migrate_registered_nodes_remove_user_id(conn);
+    remove_legacy_user_state(conn);
 }
 
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, column_type: &str) {
@@ -50,6 +53,83 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, column_ty
             panic!("failed to migrate {table}.{column}: {msg}");
         }
     }
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&sql).expect("prepare pragma table_info");
+    let has_column = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query pragma table_info")
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    has_column
+}
+
+fn migrate_registered_nodes_remove_user_id(conn: &Connection) {
+    if !table_has_column(conn, "registered_nodes", "user_id") {
+        return;
+    }
+
+    conn.execute_batch(
+        r#"
+        DROP INDEX IF EXISTS idx_nodes_user;
+        DROP TABLE IF EXISTS registered_nodes_new;
+        CREATE TABLE registered_nodes_new (
+            node_id         TEXT PRIMARY KEY,
+            ed25519_pubkey  TEXT NOT NULL,
+            x25519_pubkey   TEXT NOT NULL,
+            display_name    TEXT,
+            owner_name      TEXT,
+            gitea_user      TEXT,
+            api_key_hash    TEXT NOT NULL,
+            endpoint_hints  TEXT,
+            created_at      TEXT NOT NULL
+        );
+
+        INSERT INTO registered_nodes_new (
+            node_id,
+            ed25519_pubkey,
+            x25519_pubkey,
+            display_name,
+            owner_name,
+            gitea_user,
+            api_key_hash,
+            endpoint_hints,
+            created_at
+        )
+        SELECT
+            node_id,
+            ed25519_pubkey,
+            x25519_pubkey,
+            display_name,
+            owner_name,
+            gitea_user,
+            api_key_hash,
+            endpoint_hints,
+            created_at
+        FROM registered_nodes;
+
+        DROP TABLE registered_nodes;
+        ALTER TABLE registered_nodes_new RENAME TO registered_nodes;
+        "#,
+    )
+    .expect("migrate registered_nodes to core schema");
+}
+
+fn remove_legacy_user_state(conn: &Connection) {
+    conn.execute_batch(
+        r#"
+        DROP INDEX IF EXISTS idx_user_tokens_hash;
+        DROP INDEX IF EXISTS idx_user_tokens_user;
+        DROP INDEX IF EXISTS idx_nodes_user;
+        DROP TABLE IF EXISTS user_contacts;
+        DROP TABLE IF EXISTS user_tokens;
+        DROP TABLE IF EXISTS password_reset_tokens;
+        DROP TABLE IF EXISTS users;
+        "#,
+    )
+    .expect("remove legacy user-account schema");
 }
 
 /// Build the full axum router for `bridges serve`.
@@ -66,7 +146,6 @@ pub fn router(state: Arc<ServerState>) -> Router {
         .merge(projects::routes(state.clone()))
         .merge(skills::routes(state.clone()))
         .merge(relay::routes(state.clone()))
-        .merge(contacts::routes(state.clone()))
         .route("/health", axum::routing::get(health))
         .layer(cors)
 }
@@ -114,29 +193,6 @@ fn load_gitea_config() -> Option<GiteaConfig> {
 }
 
 const SERVER_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS users (
-    user_id         TEXT PRIMARY KEY,
-    email           TEXT UNIQUE,
-    display_name    TEXT,
-    created_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_tokens (
-    token_id        TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL,
-    token_hash      TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    scopes          TEXT NOT NULL DEFAULT 'all',
-    prefix          TEXT NOT NULL DEFAULT '',
-    last_used_at    TEXT,
-    expires_at      TEXT,
-    created_at      TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash);
-CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON user_tokens(user_id);
-
 CREATE TABLE IF NOT EXISTS registered_nodes (
     node_id         TEXT PRIMARY KEY,
     ed25519_pubkey  TEXT NOT NULL,
@@ -144,14 +200,10 @@ CREATE TABLE IF NOT EXISTS registered_nodes (
     display_name    TEXT,
     owner_name      TEXT,
     gitea_user      TEXT,
-    user_id         TEXT,
     api_key_hash    TEXT NOT NULL,
     endpoint_hints  TEXT,
-    created_at      TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
+    created_at      TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_nodes_user ON registered_nodes(user_id);
 
 CREATE TABLE IF NOT EXISTS server_projects (
     project_id      TEXT PRIMARY KEY,
@@ -189,13 +241,5 @@ CREATE TABLE IF NOT EXISTS server_skills (
     name            TEXT NOT NULL,
     description     TEXT,
     created_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_contacts (
-    user_id         TEXT NOT NULL,
-    contact_node_id TEXT NOT NULL,
-    display_name    TEXT,
-    added_at        TEXT NOT NULL,
-    PRIMARY KEY (user_id, contact_node_id)
 );
 "#;

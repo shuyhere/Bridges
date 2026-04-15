@@ -24,15 +24,10 @@ cargo build --release --manifest-path cli/Cargo.toml
 # npm install -g bridges
 ```
 
-### Step 2: Obtain an API token if your coordination service requires one
-
-1. Use your coordination service's token issuance flow or operator-provided token process
-2. Copy the resulting `bridges_sk_...` token
-
-### Step 3: Setup the CLI with your token
+### Step 2: Set up the CLI
 
 ```bash
-bridges setup --coordination <COORDINATION_URL> --token bridges_sk_YOUR_TOKEN_HERE
+bridges setup --coordination <COORDINATION_URL>
 ```
 
 This:
@@ -41,7 +36,7 @@ This:
 - Saves config to `~/.bridges/config.json`
 - Creates Gitea credentials for git-backed project sync
 
-### Step 4: Verify
+### Step 3: Verify
 
 ```bash
 bridges status
@@ -49,7 +44,7 @@ bridges status
 
 You should see your node ID, coordination server, and Gitea status.
 
-### Step 5: Start the daemon
+### Step 4: Start the daemon
 
 ```bash
 # Install as a background service (recommended)
@@ -84,13 +79,13 @@ The skill gives the agent full knowledge of all bridges commands, project workfl
 ### For Codex
 
 ```bash
-bridges setup --coordination <COORDINATION_URL> --token YOUR_TOKEN --runtime codex
+bridges setup --coordination <COORDINATION_URL> --runtime codex
 ```
 
 ### For OpenClaw or Generic HTTP runtimes
 
 ```bash
-bridges setup --coordination <COORDINATION_URL> --token YOUR_TOKEN \
+bridges setup --coordination <COORDINATION_URL> \
   --runtime openclaw --endpoint http://<LOCAL_RUNTIME_HOST>:8080
 ```
 
@@ -163,13 +158,9 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 ### Setup
 
 ```bash
-# Token-based setup (recommended when token issuance is enabled)
-bridges setup --coordination <URL> --token <YOUR_DASHBOARD_TOKEN>
-bridges setup --coordination <URL> --token <TOKEN> --runtime claude-code --name <display_name>
-bridges setup --coordination <URL> --token <TOKEN> --runtime codex --name <display_name>
-
-# Legacy setup (creates a standalone node without token-based registration)
+bridges setup --coordination <URL>
 bridges setup --coordination <URL> --runtime claude-code --name <display_name>
+bridges setup --coordination <URL> --runtime codex --name <display_name>
 
 bridges status
 bridges service install
@@ -178,7 +169,6 @@ bridges service install
 Coordination environment:
 
 - `--coordination` points at the central Bridges server
-- `--token` uses a coordination-service API token for token-based registration
 - the coordination server handles registration, project membership, invites, peer key lookup, mailbox relay, and DERP relay
 - if Gitea is enabled on that server, `bridges setup` also returns the Gitea URL and saved credentials
 - the local daemon listens on `http://<LOCAL_BRIDGES_HOST>:7070` by default and is the endpoint used by `ask`, `debate`, `broadcast`, and `publish`

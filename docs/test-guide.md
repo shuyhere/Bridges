@@ -72,15 +72,6 @@ Only use this once a public beta package is actually published. Until then, use 
 
 ## Part 3: Set up each user
 
-If your deployment includes token issuance:
-
-```bash
-bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <BRIDGES_TOKEN> --name "Person A"
-bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <BRIDGES_TOKEN> --name "Person B"
-```
-
-For a local/dev setup without tokens:
-
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Person A"
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Person B"

@@ -85,15 +85,6 @@ If a package release is published later, you can use that instead.
 
 ## 5. Set up each user node
 
-If you are using token-based registration:
-
-```bash
-bridges setup --coordination http://<SERVER_HOST>:17080 --token <TOKEN> --name "Alice"
-bridges setup --coordination http://<SERVER_HOST>:17080 --token <TOKEN> --name "Bob"
-```
-
-For pure local/dev testing without issued tokens:
-
 ```bash
 bridges setup --coordination http://<SERVER_HOST>:17080 --name "Alice"
 bridges setup --coordination http://<SERVER_HOST>:17080 --name "Bob"

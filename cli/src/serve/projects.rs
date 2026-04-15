@@ -57,7 +57,6 @@ pub fn routes(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/v1/projects", post(create_project))
         .route("/v1/projects", get(list_projects))
-        .route("/v1/user/projects", get(list_user_projects))
         .route("/v1/projects/:id", get(get_project))
         .route("/v1/projects/:id/members", get(list_members))
         .route(
@@ -75,78 +74,6 @@ pub fn routes(state: Arc<ServerState>) -> Router {
             auth_middleware,
         ))
         .with_state(state)
-}
-
-/// List projects for the authenticated user (resolves user → nodes → projects).
-/// Accepts node API keys and externally provisioned user tokens.
-async fn list_user_projects(
-    State(state): State<Arc<ServerState>>,
-    Extension(auth): Extension<AuthNode>,
-) -> Result<Json<Vec<ProjectResp>>, StatusCode> {
-    let db = state.db.lock().await;
-
-    // Find the user_id for this node
-    let user_id: Option<String> = db
-        .query_row(
-            "SELECT user_id FROM registered_nodes WHERE node_id = ?1",
-            rusqlite::params![auth.0],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
-    // Get all nodes belonging to this user
-    let node_ids: Vec<String> = if let Some(ref uid) = user_id {
-        let mut stmt = db
-            .prepare("SELECT node_id FROM registered_nodes WHERE user_id = ?1")
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let ids: Vec<String> = stmt
-            .query_map(rusqlite::params![uid], |row| row.get(0))
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .filter_map(|r| r.ok())
-            .collect();
-        ids
-    } else {
-        vec![auth.0.clone()]
-    };
-
-    // Find all projects these nodes are members of
-    let mut projects = Vec::new();
-    for nid in &node_ids {
-        let mut stmt = db
-            .prepare(
-                "SELECT DISTINCT p.project_id, p.slug, p.display_name, p.description, p.created_by, p.gitea_owner, p.gitea_repo, p.created_at \
-                 FROM server_projects p \
-                 JOIN server_members m ON p.project_id = m.project_id \
-                 WHERE m.node_id = ?1",
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let rows: Vec<ProjectResp> = stmt
-            .query_map(rusqlite::params![nid], |row| {
-                Ok(ProjectResp {
-                    project_id: row.get(0)?,
-                    slug: row.get(1)?,
-                    display_name: row.get(2)?,
-                    description: row.get(3)?,
-                    created_by: row.get(4)?,
-                    gitea_owner: row.get(5)?,
-                    gitea_repo: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            })
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .filter_map(|r| r.ok())
-            .collect();
-        for p in rows {
-            if !projects
-                .iter()
-                .any(|e: &ProjectResp| e.project_id == p.project_id)
-            {
-                projects.push(p);
-            }
-        }
-    }
-    Ok(Json(projects))
 }
 
 async fn create_project(

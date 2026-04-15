@@ -28,8 +28,6 @@ pub struct InviteResp {
 pub struct JoinReq {
     #[serde(rename = "inviteToken")]
     pub invite_token: String,
-    #[serde(rename = "nodeId")]
-    pub node_id: Option<String>,
     #[serde(rename = "agentRole")]
     pub agent_role: Option<String>,
 }
@@ -155,7 +153,7 @@ pub async fn join_project_handler(
 ) -> Result<Json<JoinResp>, StatusCode> {
     let token_hash = hash_token(&req.invite_token);
     let now = chrono::Utc::now().to_rfc3339();
-    let joining_node = req.node_id.unwrap_or(auth.0);
+    let joining_node = auth.0;
     let role = req.agent_role.unwrap_or_else(|| "member".to_string());
     let gitea = state.gitea.clone();
 

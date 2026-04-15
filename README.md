@@ -86,7 +86,7 @@ If your runtime supports instruction files, prompts, tools, or skill folders, co
 For HTTP-based runtimes, configure Bridges to call the local runtime endpoint:
 
 ```bash
-bridges setup --coordination <COORDINATION_URL> --token <TOKEN> \
+bridges setup --coordination <COORDINATION_URL> \
   --runtime generic --endpoint http://<LOCAL_RUNTIME_HOST>:<PORT>/chat
 ```
 
@@ -117,14 +117,6 @@ curl http://<COORDINATION_HOST>:17080/health
 If the coordination server is running on the same machine, replace `<COORDINATION_HOST>` with your local loopback host.
 
 ### 3. Set up a local node
-
-With an API token:
-
-```bash
-bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <BRIDGES_TOKEN>
-```
-
-Or without a token in a local/dev environment:
 
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080
@@ -167,7 +159,7 @@ Before publishing or deploying, verify that you do **not** commit:
 
 - `.env` files with real credentials
 - `~/.bridges/` local state
-- live API tokens or OAuth secrets
+- live node API keys, admin tokens, or other service secrets
 - private key material
 - production database files
 

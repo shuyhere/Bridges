@@ -28,15 +28,6 @@ If a package release is published later, you can install from npm instead.
 
 ## 2. Set up each machine
 
-With API tokens:
-
-```bash
-bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <TOKEN_A> --name "Machine A"
-bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <TOKEN_B> --name "Machine B"
-```
-
-Without tokens in a local/dev deployment:
-
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Machine A"
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Machine B"

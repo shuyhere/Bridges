@@ -11,7 +11,7 @@ Use this checklist before exporting or releasing the public self-host beta editi
 ## B. Sensitive data review
 
 - [ ] No `.env` files with real values are tracked
-- [ ] No private keys, OAuth secrets, cloud credentials, or live API tokens are tracked
+- [ ] No private keys, service secrets, cloud credentials, or live API tokens are tracked
 - [ ] No local state such as `.bridges/`, `*.db`, or user config files are tracked
 - [ ] No personal machine paths or usernames remain in public docs unless intentionally generic
 - [ ] No production-only hardcoded domains remain in public-facing docs/examples unless explicitly intended
