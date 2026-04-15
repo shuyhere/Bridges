@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -32,7 +33,7 @@ pub struct JoinReq {
     pub agent_role: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct JoinResp {
     pub joined: bool,
     #[serde(rename = "projectId")]
@@ -106,9 +107,12 @@ pub async fn join_project_handler(
     let joining_node = auth.0;
     let role = req.agent_role.unwrap_or_else(|| "member".to_string());
 
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
+    let tx = db
+        .transaction()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (invite_id, max_uses, use_count): (String, Option<i64>, i64) = db
+    let (invite_id, max_uses, use_count): (String, Option<i64>, i64) = tx
         .query_row(
             "SELECT invite_id, max_uses, use_count FROM server_invites \
              WHERE project_id = ?1 AND token_hash = ?2",
@@ -117,24 +121,44 @@ pub async fn join_project_handler(
         )
         .map_err(|_| StatusCode::NOT_FOUND)?;
 
+    let already_member = tx
+        .query_row(
+            "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+            rusqlite::params![project_id, joining_node],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some();
+
+    if already_member {
+        tx.commit().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(JoinResp {
+            joined: true,
+            project_id,
+        }));
+    }
+
     if let Some(max) = max_uses {
         if use_count >= max {
             return Err(StatusCode::GONE);
         }
     }
 
-    db.execute(
-        "INSERT OR IGNORE INTO server_members (project_id, node_id, agent_role, joined_at) \
+    tx.execute(
+        "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) \
          VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![project_id, joining_node, role, now],
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    db.execute(
+    tx.execute(
         "UPDATE server_invites SET use_count = use_count + 1 WHERE invite_id = ?1",
         rusqlite::params![invite_id],
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.commit().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(JoinResp {
         joined: true,
@@ -177,4 +201,160 @@ pub async fn list_invites_handler(
         .filter_map(|r| r.ok())
         .collect();
     Ok(Json(invites))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Path, State};
+    use axum::Extension;
+    use tokio::sync::Mutex;
+
+    fn test_state() -> Arc<ServerState> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::super::init_server_db(&conn);
+        Arc::new(ServerState {
+            db: Mutex::new(conn),
+        })
+    }
+
+    async fn seed_project_and_invite(
+        state: &Arc<ServerState>,
+        project_id: &str,
+        owner_node_id: &str,
+        invite_token: &str,
+        max_uses: Option<i64>,
+        use_count: i64,
+    ) {
+        let db = state.db.lock().await;
+        db.execute(
+            "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![project_id, "proj", "proj", Option::<String>::None, owner_node_id, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'owner', ?3)",
+            rusqlite::params![project_id, owner_node_id, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO server_invites (invite_id, project_id, token_hash, created_by, max_uses, use_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                "inv_test",
+                project_id,
+                hash_token(invite_token),
+                owner_node_id,
+                max_uses,
+                use_count,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+    }
+
+    async fn read_use_count(state: &Arc<ServerState>, project_id: &str) -> i64 {
+        let db = state.db.lock().await;
+        db.query_row(
+            "SELECT use_count FROM server_invites WHERE project_id = ?1",
+            rusqlite::params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn duplicate_join_does_not_consume_additional_use() {
+        let state = test_state();
+        let project_id = "proj_test";
+        let owner = "kd_owner";
+        let member = "kd_member";
+        let invite_token = "bridges_inv_test";
+        seed_project_and_invite(&state, project_id, owner, invite_token, Some(2), 0).await;
+
+        let req = JoinReq {
+            invite_token: invite_token.to_string(),
+            agent_role: Some("member".to_string()),
+        };
+
+        let _ = join_project_handler(
+            State(state.clone()),
+            Extension(AuthNode(member.to_string())),
+            Path(project_id.to_string()),
+            Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_use_count(&state, project_id).await, 1);
+
+        let req = JoinReq {
+            invite_token: invite_token.to_string(),
+            agent_role: Some("member".to_string()),
+        };
+        let _ = join_project_handler(
+            State(state.clone()),
+            Extension(AuthNode(member.to_string())),
+            Path(project_id.to_string()),
+            Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_use_count(&state, project_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_invite_blocks_new_member() {
+        let state = test_state();
+        let project_id = "proj_exhausted";
+        let owner = "kd_owner";
+        let invite_token = "bridges_inv_test";
+        seed_project_and_invite(&state, project_id, owner, invite_token, Some(1), 1).await;
+
+        let req = JoinReq {
+            invite_token: invite_token.to_string(),
+            agent_role: None,
+        };
+        let result = join_project_handler(
+            State(state),
+            Extension(AuthNode("kd_new".to_string())),
+            Path(project_id.to_string()),
+            Json(req),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn already_joined_member_can_repeat_request_even_if_invite_is_exhausted() {
+        let state = test_state();
+        let project_id = "proj_repeat";
+        let owner = "kd_owner";
+        let member = "kd_member";
+        let invite_token = "bridges_inv_test";
+        seed_project_and_invite(&state, project_id, owner, invite_token, Some(1), 1).await;
+
+        {
+            let db = state.db.lock().await;
+            db.execute(
+                "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'member', ?3)",
+                rusqlite::params![project_id, member, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        let req = JoinReq {
+            invite_token: invite_token.to_string(),
+            agent_role: None,
+        };
+        let result = join_project_handler(
+            State(state.clone()),
+            Extension(AuthNode(member.to_string())),
+            Path(project_id.to_string()),
+            Json(req),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(read_use_count(&state, project_id).await, 1);
+    }
 }
