@@ -24,7 +24,7 @@ Purpose:
 - published npm package and GitHub releases
 - portable setup docs
 - Bridges skill installation for agent runtimes
-- reproducible validation and release flow
+- reproducible validation and release flow for the core network component
 
 Recommended branches:
 - `main` — latest public beta-ready state
@@ -43,7 +43,6 @@ A separate public repo is safer because it:
 Keep in the public repo:
 - `cli/`
 - `registry/`
-- `web/`
 - `skills/bridges/`
 - `docs/`
 - `docker/`
@@ -111,13 +110,6 @@ npm ci
 npm run build
 npm rebuild better-sqlite3
 npm test
-```
-
-### Web
-```bash
-cd web
-npm ci
-npm run build
 ```
 
 ### Root package

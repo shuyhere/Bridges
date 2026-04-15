@@ -7,6 +7,3 @@ bin/bridges-*
 .env
 .bridges/
 Cargo.lock
-web/.next/
-web/node_modules/
-web/.env.local

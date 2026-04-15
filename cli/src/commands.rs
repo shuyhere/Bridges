@@ -78,8 +78,8 @@ pub fn cmd_setup(
     }
 
     if let Some(api_token) = token {
-        // Token-based setup: use a token generated from the web dashboard
-        println!("\nRegistering node with dashboard token...");
+        // Token-based setup: use a coordination-service API token
+        println!("\nRegistering node with API token...");
         cmd_register_with_token(coordination, api_token, display_name.as_deref());
     } else {
         // Legacy setup: register directly (creates a new node-level API key)
@@ -123,8 +123,8 @@ pub fn cmd_setup(
     println!("  bridges ask <node> \"hi\" -p <id>  # talk to a peer");
 }
 
-/// Register a node using a dashboard-generated API token.
-/// The token is used both as Bearer auth (linking to user) and becomes the node's API key.
+/// Register a node using a coordination-service API token.
+/// The token is used as Bearer auth and may also become the node's API key.
 fn cmd_register_with_token(coordination: &str, api_token: &str, display_name: Option<&str>) {
     let (_signing_key, verifying_key) = identity::load_or_create_keypair();
     let node_id = identity::derive_node_id(&verifying_key);
@@ -144,7 +144,7 @@ fn cmd_register_with_token(coordination: &str, api_token: &str, display_name: Op
         "displayName": name,
     });
 
-    // Register node with the user's token as Bearer auth — links node to user account
+    // Register node with the provided token as Bearer auth
     let url = format!("{}/v1/auth/register", coordination.trim_end_matches('/'));
     let resp = match client
         .post(&url)
@@ -169,7 +169,7 @@ fn cmd_register_with_token(coordination: &str, api_token: &str, display_name: Op
     let node_api_key = match val["apiKey"].as_str() {
         Some(k) => k.to_string(),
         None => {
-            // If server didn't return an apiKey, use the dashboard token directly
+            // If server didn't return an apiKey, use the provided token directly
             api_token.to_string()
         }
     };
@@ -208,7 +208,7 @@ fn cmd_register_with_token(coordination: &str, api_token: &str, display_name: Op
         gitea_password,
     };
     cfg.save();
-    println!("Registered as {} (linked to your account)", node_id);
+    println!("Registered as {}", node_id);
     println!("Config saved to ~/.bridges/config.json");
 }
 
@@ -279,7 +279,7 @@ pub fn cmd_register(coordination: &str, display_name: Option<&str>) {
         println!("Gitea account: {}", gitea_user.as_deref().unwrap_or("?"));
         if let Some(ref url) = gitea_url {
             println!(
-                "Gitea dashboard: {} (credentials saved to ~/.bridges/config.json)",
+                "Gitea URL: {} (credentials saved to ~/.bridges/config.json)",
                 url
             );
         }

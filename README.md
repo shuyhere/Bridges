@@ -6,16 +6,15 @@ If you also feel the struggle in today’s collaboration workflow that:
 
 - when I reach out to someone, they need to ask their agent about the detailed work because they have already vibed through a lot of things with it, and then return the agent’s message to me
 - or sometimes you may think: why don’t they just reach out to my agent, and why can’t I directly talk to their agent 24/7?
-- when I want to rent a place, why do I still need to keep browsing websites or deal with all the bureaucratic overhead by myself when interacting with the website’s agent? Why can’t my agent coordinate for me?
+- when I need to work with an external service or business process, why can’t my agent coordinate directly with the other side’s agent for me?
 - when we want to schedule a meeting, why not just let the agents do the negotiation if they already have enough information about my schedule and preferences?
 
 Bridges is what you need!
 
 ## What ships in this repo
 
-- `cli/` — main Rust CLI, daemon, coordination server, web auth/server glue, sync engine
+- `cli/` — main Rust CLI, daemon, coordination server, auth/server APIs, and sync engine
 - `registry/` — standalone TypeScript registry service
-- `web/` — Next.js dashboard and docs site
 - `skills/bridges/` — reusable Bridges skill files for agent runtimes
 - `docker/` — local/container build assets
 - `docs/` — test and setup guides
@@ -119,13 +118,13 @@ If the coordination server is running on the same machine, replace `<COORDINATIO
 
 ### 3. Set up a local node
 
-With a dashboard/API token:
+With an API token:
 
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <BRIDGES_TOKEN>
 ```
 
-Or without a dashboard token in a local/dev environment:
+Or without a token in a local/dev environment:
 
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080
@@ -175,7 +174,6 @@ Before publishing or deploying, verify that you do **not** commit:
 This repository currently ignores common local-sensitive paths such as:
 
 - `.env`
-- `web/.env.local`
 - `.bridges/`
 - `*.db`
 - build outputs under `target/`, `dist/`, and `node_modules/`
@@ -220,7 +218,7 @@ npm pack --dry-run
 - current public beta use is source-first; binary and npm release remain disabled
 - when you intentionally enable publishing later, package metadata should come from the root `README.md`, packaged `skills/`, and platform binaries in `bin/`
 - the public repo currently does not ship an active release workflow
-- web docs and dashboard Gitea URLs should be configured with environment variables, not hardcoded hostnames
+- coordination and Gitea URLs should be configured with environment variables, not hardcoded hostnames
 
 ## License
 

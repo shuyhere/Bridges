@@ -76,7 +76,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, column_ty
 
 /// Build the full axum router for `bridges serve`.
 pub fn router(state: Arc<ServerState>) -> Router {
-    // CORS layer for web frontend
+    // CORS layer for external clients
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)

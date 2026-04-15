@@ -164,7 +164,7 @@ async fn github_callback(
     // Upsert user
     match upsert_oauth_user(&state, &email, &name, Some(&github_id), None).await {
         Ok(session_token) => {
-            // Redirect to frontend with token
+            // Redirect to configured client callback with token
             Redirect::temporary(&format!("/login?token={}", session_token)).into_response()
         }
         Err(e) => (

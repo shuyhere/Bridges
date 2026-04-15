@@ -1,7 +1,0 @@
-export const COORDINATION_EXAMPLE_URL =
-  process.env.NEXT_PUBLIC_COORDINATION_EXAMPLE_URL ??
-  "http://<COORDINATION_HOST>:17080";
-
-export const GITEA_PUBLIC_URL =
-  process.env.NEXT_PUBLIC_GITEA_URL ??
-  "http://<GITEA_HOST>:3000";

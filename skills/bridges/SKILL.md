@@ -24,12 +24,10 @@ cargo build --release --manifest-path cli/Cargo.toml
 # npm install -g bridges
 ```
 
-### Step 2: Create an account and get a token
+### Step 2: Obtain an API token if your coordination service requires one
 
-1. Go to your Bridges dashboard URL (or your self-hosted coordination server URL)
-2. Click **"Get Started"** — sign up with email, GitHub, or Google
-3. After login, go to **Dashboard → API Tokens**
-4. Click **"Generate"** and copy the `bridges_sk_...` token
+1. Use your coordination service's token issuance flow or operator-provided token process
+2. Copy the resulting `bridges_sk_...` token
 
 ### Step 3: Setup the CLI with your token
 
@@ -39,7 +37,7 @@ bridges setup --coordination <COORDINATION_URL> --token bridges_sk_YOUR_TOKEN_HE
 
 This:
 - Generates Ed25519 keypairs locally (private key never leaves your machine)
-- Registers your node with the coordination server, linked to your web account
+- Registers your node with the coordination server
 - Saves config to `~/.bridges/config.json`
 - Creates Gitea credentials for git-backed project sync
 
@@ -165,12 +163,12 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 ### Setup
 
 ```bash
-# Token-based setup (recommended — links node to your web account)
+# Token-based setup (recommended when token issuance is enabled)
 bridges setup --coordination <URL> --token <YOUR_DASHBOARD_TOKEN>
 bridges setup --coordination <URL> --token <TOKEN> --runtime claude-code --name <display_name>
 bridges setup --coordination <URL> --token <TOKEN> --runtime codex --name <display_name>
 
-# Legacy setup (creates standalone node, not linked to web account)
+# Legacy setup (creates a standalone node without token-based registration)
 bridges setup --coordination <URL> --runtime claude-code --name <display_name>
 
 bridges status
@@ -180,9 +178,9 @@ bridges service install
 Coordination environment:
 
 - `--coordination` points at the central Bridges server
-- `--token` uses a dashboard-generated API token to link the node to your user account
+- `--token` uses a coordination-service API token for token-based registration
 - the coordination server handles registration, project membership, invites, peer key lookup, mailbox relay, and DERP relay
-- if Gitea is enabled on that server, `bridges setup` also returns the Gitea dashboard URL and saved credentials
+- if Gitea is enabled on that server, `bridges setup` also returns the Gitea URL and saved credentials
 - the local daemon listens on `http://<LOCAL_BRIDGES_HOST>:7070` by default and is the endpoint used by `ask`, `debate`, `broadcast`, and `publish`
 - `claude-code` and `codex` are local CLI runtimes that reuse the agent's own logged-in session instead of requiring a separate model API key
 - `openclaw` and `generic` are HTTP runtimes and may require explicit endpoint and token configuration

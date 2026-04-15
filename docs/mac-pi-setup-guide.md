@@ -98,7 +98,7 @@ After that, Pi can use the Bridges skill to:
 
 ## 5. Set up the local node against the central service
 
-If you have a dashboard/API token:
+If you have an API token:
 
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <BRIDGES_TOKEN> --name "Your Name"

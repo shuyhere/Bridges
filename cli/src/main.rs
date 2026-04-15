@@ -62,7 +62,7 @@ enum Commands {
         /// Coordination server URL
         #[arg(long, default_value = "http://127.0.0.1:17080")]
         coordination: String,
-        /// API token from the web dashboard (skips registration)
+        /// API token for token-based registration
         #[arg(long)]
         token: Option<String>,
         /// Runtime type (claude-code, codex, openclaw, generic)
@@ -101,11 +101,11 @@ enum Commands {
     },
 
     // ── Coordination commands ──
-    /// Run the coordination server (+ Gitea for git sync & dashboard)
+    /// Run the coordination server (+ Gitea for git sync)
     Serve {
         #[arg(short, long, default_value = "17080")]
         port: u16,
-        /// Gitea port for git hosting & dashboard
+        /// Gitea port for git hosting
         #[arg(long, default_value = "3000")]
         gitea_port: u16,
         /// Path to server SQLite database

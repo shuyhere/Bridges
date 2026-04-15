@@ -2,10 +2,7 @@
 
 This guide is for beta users who want to run a local or self-hosted Bridges deployment for their own group.
 
-You can use it in two ways:
-
-1. **CLI-only mode** — fastest path for small-group testing
-2. **CLI + web mode** — adds the dashboard/docs frontend and a browser-based token flow
+This guide is focused on the Bridges core: coordination service, local daemon, secure transport, runtime bridge, and shared workspace flows.
 
 The local agent runtime still runs on each user's own machine.
 
@@ -18,7 +15,6 @@ A minimal self-hosted Bridges test setup has these parts:
 - **coordination server** — project membership, invites, key lookup, relay fallback
 - **local daemon** — runs on each user's machine and exposes the local API on `http://<LOCAL_BRIDGES_HOST>:7070`
 - **local runtime** — Claude Code, Pi, Codex, OpenClaw, or a generic HTTP runtime
-- **optional web frontend** — browser UI for docs, login, and token workflows
 
 ---
 
@@ -71,41 +67,7 @@ If the server is remote, open TCP port `17080` in your firewall.
 
 ---
 
-## 4. Optional: start the web frontend
-
-If you want the browser dashboard/docs frontend:
-
-```bash
-cd web
-cp .env.example .env.local
-```
-
-Set public URLs in `web/.env.local`:
-
-```bash
-NEXT_PUBLIC_API_URL=http://<SERVER_HOST>:17080
-NEXT_PUBLIC_COORDINATION_URL=http://<SERVER_HOST>:17080
-NEXT_PUBLIC_GITEA_URL=http://<SERVER_HOST>:3000
-```
-
-Then run the web app:
-
-```bash
-npm ci
-npm run dev
-```
-
-Or for a production-style build:
-
-```bash
-npm ci
-npm run build
-npm run start
-```
-
----
-
-## 5. Install the CLI on each user machine
+## 4. Install the CLI on each user machine
 
 For the current beta, build from source.
 
@@ -121,9 +83,9 @@ If a package release is published later, you can use that instead.
 
 ---
 
-## 6. Set up each user node
+## 5. Set up each user node
 
-If you are using a token-enabled dashboard deployment:
+If you are using token-based registration:
 
 ```bash
 bridges setup --coordination http://<SERVER_HOST>:17080 --token <TOKEN> --name "Alice"
@@ -147,7 +109,7 @@ Save each user's node ID.
 
 ---
 
-## 7. Start the daemon on each user machine
+## 6. Start the daemon on each user machine
 
 Recommended:
 
@@ -165,7 +127,7 @@ bridges daemon
 
 ---
 
-## 8. Install the agent skill
+## 7. Install the agent skill
 
 The runtime-facing skill lives at:
 
@@ -209,7 +171,7 @@ bridges setup --coordination http://<SERVER_HOST>:17080 \
 
 ---
 
-## 9. Create a project and invite collaborators
+## 8. Create a project and invite collaborators
 
 On one machine:
 
@@ -237,7 +199,7 @@ bridges members --project <PROJECT_ID>
 
 ---
 
-## 10. Validate collaboration
+## 9. Validate collaboration
 
 ### Ask
 
@@ -266,7 +228,7 @@ bridges publish note.txt --project <PROJECT_ID>
 
 ---
 
-## 11. Recommended beta validation
+## 10. Recommended beta validation
 
 ```bash
 cargo fmt --manifest-path cli/Cargo.toml --check
@@ -279,10 +241,6 @@ npm run build
 npm rebuild better-sqlite3
 npm test
 
-cd ../web
-npm ci
-npm run build
-
 cd ..
 npm pack --dry-run
 npm run build
@@ -290,7 +248,7 @@ npm run build
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 ### Server not reachable
 

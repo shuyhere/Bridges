@@ -19,7 +19,7 @@ Use this checklist before exporting or releasing the public self-host beta editi
 Suggested checks:
 
 ```bash
-rg -n --hidden --glob '!.git' --glob '!node_modules/**' --glob '!web/node_modules/**' \
+rg -n --hidden --glob '!.git' --glob '!node_modules/**' \
   --glob '!target/**' --glob '!dist/**' \
   '(BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z\-_]{35}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|bridges_sk_[A-Za-z0-9_\-]{16,})' .
 
@@ -34,7 +34,6 @@ git log --all --oneline -G 'BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY|ghp_[A-Za-z0-
 - [ ] `docs/test-guide.md` is usable by external beta groups
 - [ ] `docs/e2e-test-guide.md` is usable by two external testers
 - [ ] `skills/bridges/SKILL.md` is portable across agent runtimes
-- [ ] web docs/examples use env-configured public URLs where needed
 
 ## D. Build and test gates
 
@@ -48,10 +47,6 @@ git log --all --oneline -G 'BEGIN (RSA|DSA|EC|OPENSSH) PRIVATE KEY|ghp_[A-Za-z0-
 - [ ] `cd registry && npm run build`
 - [ ] `cd registry && npm rebuild better-sqlite3`
 - [ ] `cd registry && npm test`
-
-### Web
-- [ ] `cd web && npm ci`
-- [ ] `cd web && npm run build`
 
 ### Root package
 - [ ] `npm pack --dry-run`

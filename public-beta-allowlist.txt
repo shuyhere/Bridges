@@ -14,7 +14,6 @@ bridges.json
 bin/bridges.js
 cli/
 registry/
-web/
 docs/
 docker/
 skills/

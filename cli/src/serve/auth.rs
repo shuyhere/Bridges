@@ -13,7 +13,7 @@ use std::sync::Arc;
 use super::ServerState;
 
 // ══════════════════════════════════════════════════════
-//  JWT session tokens (for web UI)
+//  JWT session tokens (for client sessions)
 // ══════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ pub fn validate_session_token(
 //  Auth extension types
 // ══════════════════════════════════════════════════════
 
-/// Extension: authenticated web user (from JWT session or user API token).
+/// Extension: authenticated user (from JWT session or user API token).
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub user_id: String,
@@ -408,7 +408,7 @@ pub async fn auth_middleware(
 }
 
 // ══════════════════════════════════════════════════════
-//  Middleware: session JWT auth (for web UI calls)
+//  Middleware: session JWT auth for authenticated client calls
 // ══════════════════════════════════════════════════════
 
 pub struct SessionAuth;

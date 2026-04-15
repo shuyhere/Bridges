@@ -28,7 +28,7 @@ If a package release is published later, you can install from npm instead.
 
 ## 2. Set up each machine
 
-With dashboard tokens:
+With API tokens:
 
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --token <TOKEN_A> --name "Machine A"
