@@ -3,12 +3,9 @@ pub mod contacts;
 pub mod endpoints;
 pub mod invites;
 pub mod keys;
-pub mod oauth;
 pub mod projects;
 pub mod relay;
 pub mod skills;
-pub mod tokens;
-pub mod users;
 
 use axum::Router;
 use rusqlite::Connection;
@@ -29,37 +26,18 @@ pub struct GiteaConfig {
     pub external_url: Option<String>,
 }
 
-/// OAuth provider config.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct OAuthConfig {
-    #[serde(default)]
-    pub github_client_id: Option<String>,
-    #[serde(default)]
-    pub github_client_secret: Option<String>,
-    #[serde(default)]
-    pub google_client_id: Option<String>,
-    #[serde(default)]
-    pub google_client_secret: Option<String>,
-}
-
 /// Shared state for all server routes.
 pub struct ServerState {
     pub db: Mutex<Connection>,
     pub gitea: Option<GiteaConfig>,
-    pub jwt_secret: String,
-    pub oauth: OAuthConfig,
-    pub base_url: String,
 }
 
 /// Initialize the server database schema.
 pub fn init_server_db(conn: &Connection) {
     conn.execute_batch(SERVER_SCHEMA)
         .expect("failed to init server schema");
-    // Migrations for existing DBs
     add_column_if_missing(conn, "registered_nodes", "gitea_user", "TEXT");
     add_column_if_missing(conn, "registered_nodes", "user_id", "TEXT");
-    add_column_if_missing(conn, "registered_nodes", "google_id", "TEXT");
-    add_column_if_missing(conn, "users", "google_id", "TEXT");
     add_column_if_missing(conn, "server_projects", "gitea_owner", "TEXT");
     add_column_if_missing(conn, "server_projects", "gitea_repo", "TEXT");
 }
@@ -76,31 +54,19 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, column_ty
 
 /// Build the full axum router for `bridges serve`.
 pub fn router(state: Arc<ServerState>) -> Router {
-    // CORS layer for external clients
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
     Router::new()
-        // Public auth routes (signup, login, node register)
         .merge(auth::routes(state.clone()))
-        .merge(users::public_routes(state.clone()))
-        // Protected user routes (profile, password change)
-        .merge(users::protected_routes(state.clone()))
-        // Token management (session-authed)
-        .merge(tokens::routes(state.clone()))
-        // Node-authed routes (CLI/daemon)
         .merge(keys::routes(state.clone()))
         .merge(endpoints::routes(state.clone()))
         .merge(projects::routes(state.clone()))
         .merge(skills::routes(state.clone()))
         .merge(relay::routes(state.clone()))
-        // Contacts
         .merge(contacts::routes(state.clone()))
-        // OAuth routes (GitHub, Google)
-        .merge(oauth::routes(state.clone()))
-        // Health check
         .route("/health", axum::routing::get(health))
         .layer(cors)
 }
@@ -114,7 +80,6 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
     init_server_db(&conn);
 
-    // Load Gitea admin config from ~/.gitea-admin.json (optional)
     let gitea = load_gitea_config();
     if let Some(ref g) = gitea {
         println!(
@@ -125,26 +90,9 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
         println!("Gitea integration: disabled (no ~/.gitea-admin.json)");
     }
 
-    // Load or generate JWT secret
-    let jwt_secret = load_or_create_jwt_secret();
-
-    let oauth = load_oauth_config();
-    if oauth.github_client_id.is_some() {
-        println!("OAuth: GitHub enabled");
-    }
-    if oauth.google_client_id.is_some() {
-        println!("OAuth: Google enabled");
-    }
-
-    let base_url =
-        std::env::var("BRIDGES_BASE_URL").unwrap_or_else(|_| format!("http://0.0.0.0:{}", port));
-
     let state = Arc::new(ServerState {
         db: Mutex::new(conn),
         gitea,
-        jwt_secret,
-        oauth,
-        base_url,
     });
     let app = router(state);
     let addr = format!("0.0.0.0:{}", port);
@@ -165,60 +113,11 @@ fn load_gitea_config() -> Option<GiteaConfig> {
     serde_json::from_str(&data).ok()
 }
 
-/// Load OAuth config from ~/.bridges/oauth.json.
-fn load_oauth_config() -> OAuthConfig {
-    let base = directories::BaseDirs::new().expect("cannot find home dir");
-    let path = base.home_dir().join(".bridges").join("oauth.json");
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        OAuthConfig::default()
-    }
-}
-
-/// Load JWT secret from ~/.bridges/jwt-secret, or generate one.
-fn load_or_create_jwt_secret() -> String {
-    let base = directories::BaseDirs::new().expect("cannot find home dir");
-    let secret_path = base.home_dir().join(".bridges").join("jwt-secret");
-
-    if let Ok(secret) = std::fs::read_to_string(&secret_path) {
-        let trimmed = secret.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    // Generate new secret
-    use rand::RngCore;
-    let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let secret = hex::encode(bytes);
-
-    if let Some(parent) = secret_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&secret_path, &secret).ok();
-
-    // Restrict permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).ok();
-    }
-
-    println!("Generated JWT secret at {}", secret_path.display());
-    secret
-}
-
 const SERVER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     user_id         TEXT PRIMARY KEY,
-    email           TEXT UNIQUE NOT NULL,
-    password_hash   TEXT NOT NULL,
+    email           TEXT UNIQUE,
     display_name    TEXT,
-    email_verified  BOOLEAN NOT NULL DEFAULT 0,
-    github_id       TEXT,
-    plan            TEXT NOT NULL DEFAULT 'free',
     created_at      TEXT NOT NULL
 );
 
@@ -298,14 +197,5 @@ CREATE TABLE IF NOT EXISTS user_contacts (
     display_name    TEXT,
     added_at        TEXT NOT NULL,
     PRIMARY KEY (user_id, contact_node_id)
-);
-
-CREATE TABLE IF NOT EXISTS password_reset_tokens (
-    token_hash      TEXT PRIMARY KEY,
-    user_id         TEXT NOT NULL,
-    expires_at      TEXT NOT NULL,
-    used            BOOLEAN NOT NULL DEFAULT 0,
-    created_at      TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 "#;

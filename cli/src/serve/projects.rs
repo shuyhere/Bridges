@@ -78,7 +78,7 @@ pub fn routes(state: Arc<ServerState>) -> Router {
 }
 
 /// List projects for the authenticated user (resolves user → nodes → projects).
-/// Accepts both session JWT and user API tokens.
+/// Accepts node API keys and externally provisioned user tokens.
 async fn list_user_projects(
     State(state): State<Arc<ServerState>>,
     Extension(auth): Extension<AuthNode>,

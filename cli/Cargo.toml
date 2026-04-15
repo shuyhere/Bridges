@@ -29,8 +29,5 @@ base64 = "0.22"
 directories = "5"
 async-trait = "0.1"
 snow = "0.9"
-argon2 = "0.5"
-jsonwebtoken = "9"
 tower-http = { version = "0.5", features = ["cors"] }
 tower = { version = "0.4", features = ["limit"] }
-lettre = { version = "0.11", features = ["tokio1-rustls-tls", "builder"], default-features = false }

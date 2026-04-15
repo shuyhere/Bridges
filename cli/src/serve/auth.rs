@@ -12,64 +12,9 @@ use std::sync::Arc;
 
 use super::ServerState;
 
-// ══════════════════════════════════════════════════════
-//  JWT session tokens (for client sessions)
-// ══════════════════════════════════════════════════════
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionClaims {
-    pub sub: String, // user_id
-    pub email: String,
-    pub exp: usize, // expiry (epoch seconds)
-    pub iat: usize, // issued at
-}
-
-/// Create a JWT session token for a user.
-pub fn create_session_token(
-    secret: &str,
-    user_id: &str,
-    email: &str,
-) -> Result<String, jsonwebtoken::errors::Error> {
-    let now = chrono::Utc::now().timestamp() as usize;
-    let claims = SessionClaims {
-        sub: user_id.to_string(),
-        email: email.to_string(),
-        exp: now + 7 * 24 * 3600, // 7 days
-        iat: now,
-    };
-    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
-    jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key)
-}
-
-/// Validate a JWT session token.
-pub fn validate_session_token(
-    secret: &str,
-    token: &str,
-) -> Result<SessionClaims, jsonwebtoken::errors::Error> {
-    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
-    let validation = jsonwebtoken::Validation::default();
-    jsonwebtoken::decode::<SessionClaims>(token, &key, &validation).map(|data| data.claims)
-}
-
-// ══════════════════════════════════════════════════════
-//  Auth extension types
-// ══════════════════════════════════════════════════════
-
-/// Extension: authenticated user (from JWT session or user API token).
-#[derive(Clone, Debug)]
-pub struct AuthUser {
-    pub user_id: String,
-    #[allow(dead_code)]
-    pub email: String,
-}
-
-/// Extension: authenticated node (from node API key — legacy / CLI).
+/// Extension: authenticated node (from node API key or externally provisioned user token).
 #[derive(Clone, Debug)]
 pub struct AuthNode(pub String);
-
-// ══════════════════════════════════════════════════════
-//  API key helpers
-// ══════════════════════════════════════════════════════
 
 /// Generate a random API key: `bridges_sk_` + 32 random bytes base64url.
 fn generate_api_key() -> String {
@@ -84,10 +29,6 @@ fn hash_api_key(key: &str) -> String {
     h.update(key.as_bytes());
     hex::encode(h.finalize())
 }
-
-// ══════════════════════════════════════════════════════
-//  Node registration (CLI → server)
-// ══════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
 pub struct RegisterReq {
@@ -120,8 +61,6 @@ pub struct RegisterResp {
 }
 
 pub fn routes(state: Arc<ServerState>) -> Router {
-    // Node registration: can be called with user token OR unauthenticated (legacy).
-    // When called with a valid user token, the node is linked to that user.
     let public = Router::new()
         .route("/v1/auth/register", post(register))
         .with_state(state.clone());
@@ -146,10 +85,9 @@ async fn register(
     let key_hash = hash_api_key(&api_key);
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Try to resolve the user from Bearer token (new flow)
+    // If the caller supplied an externally provisioned user token, link this node to that user.
     let user_id = resolve_user_from_bearer(&state, &headers).await;
 
-    // Create Gitea account if Gitea is configured
     let (gitea_url, gitea_user, gitea_token, gitea_password) = if let Some(ref gitea) = state.gitea
     {
         match create_gitea_user(gitea, &req.node_id, req.display_name.as_deref()).await {
@@ -322,12 +260,8 @@ async fn refresh(
     }))
 }
 
-// ══════════════════════════════════════════════════════
-//  Middleware: node API key auth (for CLI/daemon calls)
-// ══════════════════════════════════════════════════════
-
 /// Middleware: verify Bearer token against `registered_nodes.api_key_hash`
-/// OR `user_tokens.token_hash`, inject AuthNode.
+/// or an externally provisioned `user_tokens.token_hash`, then inject `AuthNode`.
 pub async fn auth_middleware(
     State(state): State<Arc<ServerState>>,
     mut req: Request,
@@ -346,7 +280,6 @@ pub async fn auth_middleware(
 
     let token_hash = hash_api_key(&token);
 
-    // 1. Try node API key (legacy CLI flow)
     let db = state.db.lock().await;
     let node_id: Option<String> = db
         .query_row(
@@ -362,21 +295,19 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // 2. Try user API token → resolve to the user's first registered node
-    let user_node: Option<(String, String)> = db
+    let user_node: Option<String> = db
         .query_row(
-            "SELECT ut.user_id, rn.node_id FROM user_tokens ut \
+            "SELECT rn.node_id FROM user_tokens ut \
              JOIN registered_nodes rn ON rn.user_id = ut.user_id \
              WHERE ut.token_hash = ?1 \
              AND (ut.expires_at IS NULL OR ut.expires_at > ?2) \
              LIMIT 1",
             rusqlite::params![token_hash, chrono::Utc::now().to_rfc3339()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .ok();
 
-    if let Some((_user_id, node_id)) = user_node {
-        // Update last_used_at
+    if let Some(node_id) = user_node {
         db.execute(
             "UPDATE user_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
             rusqlite::params![chrono::Utc::now().to_rfc3339(), token_hash],
@@ -387,104 +318,9 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // 3. Try JWT session → resolve user → first registered node
-    if let Ok(claims) = validate_session_token(&state.jwt_secret, &token) {
-        let jwt_node: Option<String> = db
-            .query_row(
-                "SELECT node_id FROM registered_nodes WHERE user_id = ?1 LIMIT 1",
-                rusqlite::params![claims.sub],
-                |row| row.get(0),
-            )
-            .ok();
-        if let Some(node_id) = jwt_node {
-            drop(db);
-            req.extensions_mut().insert(AuthNode(node_id));
-            return next.run(req).await;
-        }
-    }
-
     drop(db);
     StatusCode::UNAUTHORIZED.into_response()
 }
-
-// ══════════════════════════════════════════════════════
-//  Middleware: session JWT auth for authenticated client calls
-// ══════════════════════════════════════════════════════
-
-pub struct SessionAuth;
-
-impl SessionAuth {
-    pub async fn middleware(
-        State(state): State<Arc<ServerState>>,
-        mut req: Request,
-        next: Next,
-    ) -> Response {
-        // Accept JWT from Authorization header or cookie
-        let token = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|s| s.to_string())
-            .or_else(|| {
-                req.headers()
-                    .get("cookie")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|cookies| {
-                        cookies.split(';').find_map(|c| {
-                            let c = c.trim();
-                            c.strip_prefix("bridges_session=").map(|s| s.to_string())
-                        })
-                    })
-            });
-
-        let token = match token {
-            Some(t) => t,
-            None => return StatusCode::UNAUTHORIZED.into_response(),
-        };
-
-        // Try JWT session first
-        if let Ok(claims) = validate_session_token(&state.jwt_secret, &token) {
-            req.extensions_mut().insert(AuthUser {
-                user_id: claims.sub,
-                email: claims.email,
-            });
-            return next.run(req).await;
-        }
-
-        // Fall back to user API token
-        let token_hash = hash_api_key(&token);
-        let db = state.db.lock().await;
-        let user: Option<(String, String)> = db
-            .query_row(
-                "SELECT ut.user_id, u.email FROM user_tokens ut \
-                 JOIN users u ON u.user_id = ut.user_id \
-                 WHERE ut.token_hash = ?1 \
-                 AND (ut.expires_at IS NULL OR ut.expires_at > ?2)",
-                rusqlite::params![token_hash, chrono::Utc::now().to_rfc3339()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok();
-
-        if let Some((user_id, email)) = user {
-            db.execute(
-                "UPDATE user_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
-                rusqlite::params![chrono::Utc::now().to_rfc3339(), token_hash],
-            )
-            .ok();
-            drop(db);
-            req.extensions_mut().insert(AuthUser { user_id, email });
-            return next.run(req).await;
-        }
-
-        drop(db);
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
-// ══════════════════════════════════════════════════════
-//  Helpers
-// ══════════════════════════════════════════════════════
 
 /// Helper to extract node_id from Bearer token in headers.
 pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option<String> {
@@ -495,7 +331,6 @@ pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option
     let token_hash = hash_api_key(token);
     let db = state.db.lock().await;
 
-    // Try node API key first
     if let Ok(node_id) = db.query_row(
         "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1",
         rusqlite::params![token_hash],
@@ -504,7 +339,6 @@ pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option
         return Some(node_id);
     }
 
-    // Try user API token → user's first node
     db.query_row(
         "SELECT rn.node_id FROM user_tokens ut \
          JOIN registered_nodes rn ON rn.user_id = ut.user_id \
@@ -517,19 +351,13 @@ pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option
     .ok()
 }
 
-/// Resolve user_id from a Bearer token (JWT or user API token).
+/// Resolve a user_id from an externally provisioned Bearer token.
 async fn resolve_user_from_bearer(state: &ServerState, headers: &HeaderMap) -> Option<String> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))?;
 
-    // Try JWT
-    if let Ok(claims) = validate_session_token(&state.jwt_secret, token) {
-        return Some(claims.sub);
-    }
-
-    // Try user API token
     let token_hash = hash_api_key(token);
     let db = state.db.lock().await;
     db.query_row(
