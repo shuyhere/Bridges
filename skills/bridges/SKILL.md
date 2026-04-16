@@ -178,6 +178,7 @@ Coordination environment:
 - message delivery may use direct encrypted transport or coordination-server mailbox fallback depending on connectivity
 - `ask` is single-target request/response; `debate`, `broadcast`, and `publish` are fanout flows and may partially succeed across project members
 - `bridges status` reflects a structured model: daemon presence, coordination health, runtime health, and reachability mode are distinct signals
+- project roles are currently `owner`, `member`, and `guest`; invite management is owner-only, while guests are limited to member listing and `ask`
 - for a stable always-on backend daemon, prefer `bridges service install` over relying on auto-spawn
 
 ### Background Daemon Service

@@ -1,61 +1,52 @@
 # Permissions & Safety
 
-## Hard rules (not configurable)
+Bridges uses a project role + capability model.
 
-These are enforced in the listener at the code level. No configuration
-can override them.
+## Project roles
 
-1. **Scope lock** — an inbound ask can only read files within the project
-   directory. No access to `~`, other projects, or system files.
+Current built-in roles:
+- `owner`
+- `member`
+- `guest`
 
-2. **No remote exec** — no inbound request can trigger shell command
-   execution on your machine. Ever.
+## Capability model
 
-3. **No writes** — no inbound request can write or modify files on your
-   machine.
+| Capability | owner | member | guest |
+| --- | --- | --- | --- |
+| `view_members` | ✅ | ✅ | ✅ |
+| `ask` | ✅ | ✅ | ✅ |
+| `debate` | ✅ | ✅ | ❌ |
+| `broadcast` | ✅ | ✅ | ❌ |
+| `publish` | ✅ | ✅ | ❌ |
+| `sync` | ✅ | ✅ | ❌ |
+| `manage_invites` | ✅ | ❌ | ❌ |
+| `admin` | ✅ | ❌ | ❌ |
 
-4. **No outbound network** — the sandboxed agent turn answering an
-   inbound ask cannot make network requests to other services.
+## Current enforcement
 
-## Configurable permissions
+- project creators become `owner`
+- invite creation/listing is owner-only
+- invite joins may request only `member` or `guest`
+- `ask` checks for `ask`
+- `debate` checks for `debate`
+- `broadcast` checks for `broadcast`
+- `publish` checks for `publish`
 
-Each agent declares what it exposes to the project:
+## Hard safety rules
 
-```json
-{
-  "share_project_files": true,
-  "share_progress": true,
-  "share_memory": false,
-  "auto_respond_asks": true,
-  "accept_proposals": true
-}
-```
+These are not role-configurable.
 
-- `share_project_files` — let others ask about files in the project
-- `share_progress` — show your PROGRESS.md section to others
-- `share_memory` — include agent memory in responses (default: off)
-- `auto_respond_asks` — answer asks automatically vs require approval
-- `accept_proposals` — receive proposals (human still approves)
+1. **Scope lock** — inbound asks stay inside the project directory.
+2. **No remote exec** — inbound asks cannot trigger shell execution on the receiver.
+3. **No remote writes** — inbound asks cannot modify the receiver's files.
+4. **No arbitrary outbound network** — the inbound answer path should not depend on unconstrained third-party network access.
 
-## Per-project overrides
+## Contributor guidance
 
-An agent can have different permissions per project. Set in
-`.bridges/project.json` under the agent's entry.
+When adding a new project action:
+1. define the required capability explicitly
+2. map it to `owner` / `member` / `guest`
+3. enforce it at the first project-aware boundary
+4. do not replace the model with scattered ad-hoc owner checks
 
-## How the sandbox works
-
-When an inbound ask arrives:
-
-```
-Listener receives POST /bridges/ask
-  → Verify Ed25519 signature
-  → Check sender is project member
-  → Create SandboxContext:
-      - projectDir: locked to project path
-      - blockedCapabilities: [exec, write, network, read_outside_project]
-  → Build constrained prompt for local agent
-  → Agent answers within sandbox
-  → Response returned directly to sender
-```
-
-The agent answering never gets access to tools that could escape the sandbox.
+See `docs/permissions-model.md` for the canonical current contract.

@@ -15,6 +15,7 @@ mod local_api;
 mod mdns;
 mod models;
 mod noise;
+mod permissions;
 mod presence;
 mod queries;
 mod serve;

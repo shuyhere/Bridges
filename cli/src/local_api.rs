@@ -10,6 +10,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::coord_client::{CoordClient, MemberInfo, PeerKeys};
+use crate::permissions::{role_has_capability, ProjectCapability};
 use crate::presence::{ComponentState, ComponentStatus, PresenceState, ReachabilityStatus};
 use crate::transport::Transport;
 
@@ -347,6 +348,27 @@ fn require_non_empty(value: &str, field: &str) -> Result<(), String> {
     }
 }
 
+fn require_project_capability(
+    members: &[MemberInfo],
+    node_id: &str,
+    capability: ProjectCapability,
+) -> Result<(), String> {
+    let member = members
+        .iter()
+        .find(|member| member.node_id == node_id)
+        .ok_or_else(|| format!("node {} is not a member of this project", node_id))?;
+    let role = member.role.as_deref().unwrap_or("member");
+    if role_has_capability(role, capability) {
+        Ok(())
+    } else {
+        Err(format!(
+            "role {} does not have {} permission",
+            role,
+            capability.as_str()
+        ))
+    }
+}
+
 /// Called by the daemon recv loop when a response message arrives.
 pub async fn store_response(
     responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
@@ -465,6 +487,32 @@ async fn handle_ask(
 
     let node_id = req.node_id.trim();
     let project_id = req.project_id.trim();
+    if !project_id.is_empty() {
+        let members = match state.coord.get_project_members(project_id).await {
+            Ok(members) => members,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(SendResponse {
+                        ok: false,
+                        error: Some(e),
+                        request_id: None,
+                    }),
+                )
+            }
+        };
+        if let Err(e) = require_project_capability(&members, &state.node_id, ProjectCapability::Ask)
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(SendResponse {
+                    ok: false,
+                    error: Some(e),
+                    request_id: None,
+                }),
+            );
+        }
+    }
     let session_id = if project_id.is_empty() {
         None
     } else {
@@ -584,6 +632,20 @@ async fn handle_broadcast(
         }
     };
 
+    if let Err(e) =
+        require_project_capability(&members, &state.node_id, ProjectCapability::Broadcast)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(BroadcastResponse {
+                ok: false,
+                sent_to: vec![],
+                error: Some(e),
+                request_ids: None,
+            }),
+        );
+    }
+
     let mut sent_to = Vec::new();
     let mut last_err = None;
     for member in &members {
@@ -667,6 +729,19 @@ async fn handle_debate(
             )
         }
     };
+
+    if let Err(e) = require_project_capability(&members, &state.node_id, ProjectCapability::Debate)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(BroadcastResponse {
+                ok: false,
+                sent_to: vec![],
+                error: Some(e),
+                request_ids: None,
+            }),
+        );
+    }
 
     let mut sent_to = Vec::new();
     let mut request_ids = Vec::new();
@@ -803,6 +878,19 @@ async fn handle_publish(
             )
         }
     };
+
+    if let Err(e) = require_project_capability(&members, &state.node_id, ProjectCapability::Publish)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(BroadcastResponse {
+                ok: false,
+                sent_to: vec![],
+                error: Some(e),
+                request_ids: None,
+            }),
+        );
+    }
 
     let mut sent_to = Vec::new();
     let mut last_err = None;
@@ -1041,10 +1129,14 @@ mod tests {
     }
 
     fn member(node_id: &str) -> MemberInfo {
+        member_with_role(node_id, "member")
+    }
+
+    fn member_with_role(node_id: &str, role: &str) -> MemberInfo {
         MemberInfo {
             node_id: node_id.to_string(),
             display_name: Some(format!("display-{node_id}")),
-            role: Some("member".to_string()),
+            role: Some(role.to_string()),
         }
     }
 
@@ -1241,6 +1333,44 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["sent_to"], serde_json::json!(["kd_peer_a"]));
         assert_eq!(json["error"], "relay unavailable");
+    }
+
+    #[tokio::test]
+    async fn handle_broadcast_rejects_guest_role() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![
+                member_with_role("kd_sender", "guest"),
+                member("kd_peer_a"),
+                member("kd_peer_b"),
+            ],
+        })));
+
+        let (status, json) = response_json(
+            handle_broadcast(
+                State(state),
+                Json(BroadcastRequest {
+                    message: "hello team".to_string(),
+                    project_id: "proj_test".to_string(),
+                    message_type: "broadcast".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["ok"], false);
+        assert_eq!(
+            json["error"],
+            "role guest does not have broadcast permission"
+        );
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use super::auth::{auth_middleware, AuthNode};
 use super::ServerState;
+use crate::permissions::{role_capabilities, role_has_capability, ProjectCapability};
 
 #[derive(Deserialize)]
 pub struct CreateProjectReq {
@@ -36,6 +37,7 @@ pub struct MemberResp {
     pub node_id: String,
     #[serde(rename = "agentRole")]
     pub agent_role: Option<String>,
+    pub capabilities: Vec<String>,
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
     #[serde(rename = "ed25519Pubkey")]
@@ -178,14 +180,17 @@ async fn list_members(
     let db = state
         .open_connection()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let is_member: bool = db
+    let viewer_role: Option<String> = db
         .query_row(
-            "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+            "SELECT agent_role FROM server_members WHERE project_id = ?1 AND node_id = ?2",
             rusqlite::params![id, auth.0],
-            |_| Ok(()),
+            |row| row.get(0),
         )
-        .is_ok();
-    if !is_member {
+        .ok();
+    let Some(viewer_role) = viewer_role else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !role_has_capability(&viewer_role, ProjectCapability::ViewMembers) {
         return Err(StatusCode::FORBIDDEN);
     }
     let mut stmt = db
@@ -198,9 +203,11 @@ async fn list_members(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let members = stmt
         .query_map(rusqlite::params![id], |row| {
+            let agent_role: Option<String> = row.get(1)?;
             Ok(MemberResp {
                 node_id: row.get(0)?,
-                agent_role: row.get(1)?,
+                capabilities: role_capabilities(agent_role.as_deref()),
+                agent_role,
                 display_name: row.get(2)?,
                 ed25519_pubkey: row.get(3)?,
                 joined_at: row.get(4)?,
@@ -265,12 +272,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_members_returns_member_metadata_to_project_member() {
+    async fn list_members_returns_member_metadata_and_capabilities() {
         let state = super::super::make_test_state();
         seed_project(
             &state,
             "proj_members",
-            &[("kd_owner", "owner"), ("kd_member", "member")],
+            &[
+                ("kd_owner", "owner"),
+                ("kd_member", "member"),
+                ("kd_guest", "guest"),
+            ],
         );
 
         let members = list_members(
@@ -289,5 +300,15 @@ mod tests {
         assert_eq!(member.agent_role.as_deref(), Some("member"));
         assert_eq!(member.display_name.as_deref(), Some("display-kd_member"));
         assert_eq!(member.ed25519_pubkey.as_deref(), Some("ed_kd_member"));
+        assert!(member.capabilities.contains(&"broadcast".to_string()));
+        assert!(!member.capabilities.contains(&"manage_invites".to_string()));
+
+        let guest = members
+            .iter()
+            .find(|member| member.node_id == "kd_guest")
+            .unwrap();
+        assert_eq!(guest.agent_role.as_deref(), Some("guest"));
+        assert!(guest.capabilities.contains(&"ask".to_string()));
+        assert!(!guest.capabilities.contains(&"publish".to_string()));
     }
 }

@@ -18,6 +18,7 @@ A minimal self-hosted Bridges test setup has these parts:
 
 Before deploying for other people, read `docs/privacy-model.md` as well. Bridges protects message content, but the coordination server still sees routing and membership metadata needed to operate the network.
 For current daemon/runtime/reachability semantics, also read `docs/presence-model.md`.
+For current role/capability boundaries, read `docs/permissions-model.md`.
 
 ---
 

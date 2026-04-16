@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::auth::AuthNode;
 use super::ServerState;
+use crate::permissions::{is_valid_join_role, role_has_capability, ProjectCapability};
 
 #[derive(Deserialize)]
 pub struct CreateInviteReq {
@@ -15,7 +16,7 @@ pub struct CreateInviteReq {
     pub max_uses: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct InviteResp {
     #[serde(rename = "inviteId")]
     pub invite_id: String,
@@ -74,14 +75,17 @@ pub async fn create_invite_handler(
     let db = state
         .open_connection()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let is_member: bool = db
+    let role: Option<String> = db
         .query_row(
-            "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+            "SELECT agent_role FROM server_members WHERE project_id = ?1 AND node_id = ?2",
             rusqlite::params![project_id, auth.0],
-            |_| Ok(()),
+            |row| row.get(0),
         )
-        .is_ok();
-    if !is_member {
+        .ok();
+    let Some(role) = role else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !role_has_capability(&role, ProjectCapability::ManageInvites) {
         return Err(StatusCode::FORBIDDEN);
     }
     db.execute(
@@ -108,6 +112,9 @@ pub async fn join_project_handler(
     let now = chrono::Utc::now().to_rfc3339();
     let joining_node = auth.0;
     let role = req.agent_role.unwrap_or_else(|| "member".to_string());
+    if !is_valid_join_role(&role) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let mut db = state
         .open_connection()
@@ -178,14 +185,17 @@ pub async fn list_invites_handler(
     let db = state
         .open_connection()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let is_member: bool = db
+    let role: Option<String> = db
         .query_row(
-            "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+            "SELECT agent_role FROM server_members WHERE project_id = ?1 AND node_id = ?2",
             rusqlite::params![project_id, auth.0],
-            |_| Ok(()),
+            |row| row.get(0),
         )
-        .is_ok();
-    if !is_member {
+        .ok();
+    let Some(role) = role else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !role_has_capability(&role, ProjectCapability::ManageInvites) {
         return Err(StatusCode::FORBIDDEN);
     }
     let mut stmt = db
@@ -356,5 +366,54 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(read_use_count(&state, project_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn create_invite_requires_owner_role() {
+        let state = test_state();
+        let project_id = "proj_owner_only";
+        let owner = "kd_owner";
+        let invite_token = "bridges_inv_test";
+        seed_project_and_invite(&state, project_id, owner, invite_token, Some(1), 0).await;
+        {
+            let db = state.open_connection().unwrap();
+            db.execute(
+                "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'member', ?3)",
+                rusqlite::params![project_id, "kd_member", chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        let result = create_invite_handler(
+            State(state),
+            Extension(AuthNode("kd_member".to_string())),
+            Path(project_id.to_string()),
+            Json(CreateInviteReq { max_uses: Some(1) }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn join_rejects_owner_role_escalation() {
+        let state = test_state();
+        let project_id = "proj_join_role";
+        let owner = "kd_owner";
+        let invite_token = "bridges_inv_test";
+        seed_project_and_invite(&state, project_id, owner, invite_token, Some(1), 0).await;
+
+        let result = join_project_handler(
+            State(state),
+            Extension(AuthNode("kd_new".to_string())),
+            Path(project_id.to_string()),
+            Json(JoinReq {
+                invite_token: invite_token.to_string(),
+                agent_role: Some("owner".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::BAD_REQUEST);
     }
 }
