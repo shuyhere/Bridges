@@ -1,5 +1,5 @@
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
+
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
@@ -17,12 +17,30 @@ pub struct Transport {
     udp: Option<Arc<UdpSocket>>,
 }
 
-/// Derive 20-byte node hash from a kd_xxx node ID (for wire packets).
-fn node_id_to_bytes(node_id: &str) -> [u8; 20] {
-    let mut out = [0u8; 20];
-    let hash = Sha256::digest(node_id.as_bytes());
-    out.copy_from_slice(&hash[..20]);
-    out
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RawPacketSource {
+    Derp(String),
+    Udp,
+}
+
+/// Verified source identity for an inbound transport packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PacketSourceIdentity {
+    Derp {
+        node_id: String,
+    },
+    Direct {
+        node_id: String,
+        src_wire_id: [u8; 20],
+    },
+}
+
+impl PacketSourceIdentity {
+    pub fn node_id(&self) -> &str {
+        match self {
+            Self::Derp { node_id } | Self::Direct { node_id, .. } => node_id,
+        }
+    }
 }
 
 impl Transport {
@@ -60,6 +78,16 @@ impl Transport {
         }
     }
 
+    fn my_wire_id(&self) -> [u8; 20] {
+        crypto::node_id_wire_id(&self.my_node_id)
+    }
+
+    /// Cache a peer identity that was resolved from coordination.
+    pub async fn remember_peer_identity(&self, peer_id: &str, expected_x25519_pub: [u8; 32]) {
+        let mut conn = self.conn.lock().await;
+        conn.remember_peer_identity(peer_id, expected_x25519_pub);
+    }
+
     /// Send raw bytes over the best available path (no encryption).
     async fn send_raw(&self, peer_id: &str, packet: &[u8]) -> Result<(), String> {
         if let Some(client) = self.derp.as_ref() {
@@ -78,7 +106,7 @@ impl Transport {
                 }
             }
             ConnPath::Derp => {
-                drop(conn); // release conn lock before sending over DERP
+                drop(conn);
                 if let Some(client) = self.derp.as_ref() {
                     client.send(peer_id, packet).await?;
                 } else {
@@ -96,24 +124,25 @@ impl Transport {
         peer_id: &str,
         their_x25519_pub: &[u8; 32],
     ) -> Result<(), String> {
-        // Create initiator handshake and M1
+        {
+            let mut conn = self.conn.lock().await;
+            conn.remember_peer_identity(peer_id, *their_x25519_pub);
+        }
+
         let (handshake, m1) =
             noise::begin_handshake_initiator(&self.my_x25519_priv, their_x25519_pub)?;
 
-        // Send M1 as V2 handshake packet
-        let src = node_id_to_bytes(&self.my_node_id);
-        let dst = node_id_to_bytes(peer_id);
+        let src = self.my_wire_id();
+        let dst = crypto::node_id_wire_id(peer_id);
         let packet = crypto::encode_wire_packet_v2(crypto::PACKET_HANDSHAKE, &src, &dst, &m1);
         self.send_raw(peer_id, &packet).await?;
 
-        // Store handshake state
         {
             let mut conn = self.conn.lock().await;
             let pc = conn.get_or_create(peer_id);
             pc.session = SessionState::HandshakePending(handshake);
         }
 
-        // Wait for M2 response (up to 5 seconds)
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let conn = self.conn.lock().await;
@@ -129,36 +158,39 @@ impl Transport {
 
     /// Encrypt plaintext and send to peer via Noise transport.
     pub async fn send(&self, peer_id: &str, plaintext: &[u8]) -> Result<(), String> {
-        // Encrypt with Noise session
         let ciphertext = {
             let mut conn = self.conn.lock().await;
             let pc = conn.get_or_create(peer_id);
             match &mut pc.session {
-                SessionState::Established(ref mut session) => noise::encrypt(session, plaintext)?,
+                SessionState::Established(session) => noise::encrypt(session, plaintext)?,
                 _ => {
                     return Err("no session key established".to_string());
                 }
             }
         };
 
-        // Send as V2 transport packet
-        let src = node_id_to_bytes(&self.my_node_id);
-        let dst = node_id_to_bytes(peer_id);
+        let src = self.my_wire_id();
+        let dst = crypto::node_id_wire_id(peer_id);
         let packet =
             crypto::encode_wire_packet_v2(crypto::PACKET_TRANSPORT, &src, &dst, &ciphertext);
         self.send_raw(peer_id, &packet).await
     }
 
     /// Handle an inbound handshake message (M1 from initiator or M2 from responder).
-    async fn handle_handshake(&self, from_peer: &str, payload: &[u8]) -> Result<(), String> {
+    async fn handle_handshake(
+        &self,
+        from_source: &PacketSourceIdentity,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let from_peer = from_source.node_id();
         let mut conn = self.conn.lock().await;
+        let expected_remote_key = conn.expected_peer_key(from_peer);
         let pc = conn.get_or_create(from_peer);
 
         match &mut pc.session {
-            SessionState::HandshakePending(ref mut handshake) => {
-                // We're the initiator, received M2
+            SessionState::HandshakePending(handshake) => {
                 let (_response, _) = noise::process_handshake_message(handshake, payload)?;
-                // Transition to transport — need to take ownership of handshake
+                verify_remote_static_binding(from_peer, expected_remote_key, handshake)?;
                 let old_session = std::mem::replace(&mut pc.session, SessionState::None);
                 if let SessionState::HandshakePending(hs) = old_session {
                     let session = noise::into_transport(hs)?;
@@ -166,40 +198,18 @@ impl Transport {
                 }
             }
             _ => {
-                // We're the responder, received M1 from a new peer.
-                // In Noise IK, we learn the initiator's static key from M1.
                 let mut handshake = noise::begin_handshake_responder(&self.my_x25519_priv)?;
                 let (m2_opt, _) = noise::process_handshake_message(&mut handshake, payload)?;
+                verify_remote_static_binding(from_peer, expected_remote_key, &handshake)?;
 
-                // Post-handshake verification: check that the initiator's static key
-                // belongs to a known/registered peer. Reject unknown initiators.
-                if let Some(remote_key) = noise::get_remote_static(&handshake) {
-                    // Verify remote key is from a registered node by checking
-                    // coordination server. For now, log the key for auditing.
-                    // The key is an X25519 public key (32 bytes).
-                    if remote_key.len() != 32 {
-                        return Err("invalid initiator key length".to_string());
-                    }
-                    eprintln!(
-                        "  handshake from {}: initiator key {}",
-                        from_peer,
-                        hex::encode(&remote_key)
-                    );
-                } else {
-                    return Err("handshake M1 did not contain initiator static key".to_string());
-                }
-
-                // Send M2 back BEFORE transitioning to Established
-                // (avoids race where peer sends data before receiving M2)
                 if let Some(m2) = m2_opt {
-                    let src = node_id_to_bytes(&self.my_node_id);
-                    let dst = node_id_to_bytes(from_peer);
+                    let src = self.my_wire_id();
+                    let dst = crypto::node_id_wire_id(from_peer);
                     let packet =
                         crypto::encode_wire_packet_v2(crypto::PACKET_HANDSHAKE, &src, &dst, &m2);
-                    drop(conn); // release lock before sending
+                    drop(conn);
                     self.send_raw(from_peer, &packet).await?;
 
-                    // Now transition to transport after M2 is sent
                     let session = noise::into_transport(handshake)?;
                     let mut conn = self.conn.lock().await;
                     let pc = conn.get_or_create(from_peer);
@@ -212,44 +222,53 @@ impl Transport {
         Ok(())
     }
 
-    /// Receive and decrypt the next inbound message. Returns (peer_id, plaintext).
+    /// Receive and decrypt the next inbound message. Returns (verified source, plaintext).
     /// Handshake messages are handled internally and not returned to the caller.
-    pub async fn recv(&self) -> Result<(String, Vec<u8>), String> {
+    pub async fn recv(&self) -> Result<(PacketSourceIdentity, Vec<u8>), String> {
         loop {
-            let (peer_id, raw) = self.recv_raw().await?;
-
-            // Check version byte
+            let (raw_source, raw) = self.recv_raw().await?;
             if raw.is_empty() {
                 continue;
             }
 
             match raw[0] {
                 0x02 => {
-                    // V2 packet
-                    let (_, pkt_type, _src, _dst, payload) = crypto::decode_wire_packet_v2(&raw)?;
+                    let (_, pkt_type, src, dst, payload) = crypto::decode_wire_packet_v2(&raw)?;
+                    if dst != self.my_wire_id() {
+                        eprintln!(
+                            "dropping V2 packet for different destination {}",
+                            hex::encode(dst)
+                        );
+                        continue;
+                    }
+                    let source = match self.resolve_packet_source(raw_source, src).await {
+                        Ok(source) => source,
+                        Err(err) => {
+                            eprintln!("discarding V2 packet: {}", err);
+                            continue;
+                        }
+                    };
+                    let peer_id = source.node_id().to_string();
 
                     match pkt_type {
                         crypto::PACKET_HANDSHAKE => {
-                            // Handle handshake internally
-                            if let Err(e) = self.handle_handshake(&peer_id, payload).await {
-                                eprintln!("handshake error from {}: {}", peer_id, e);
+                            if let Err(err) = self.handle_handshake(&source, payload).await {
+                                eprintln!("handshake error from {}: {}", peer_id, err);
                             }
-                            continue; // don't return to caller
+                            continue;
                         }
                         crypto::PACKET_TRANSPORT => {
-                            // Decrypt with Noise session
                             let mut conn = self.conn.lock().await;
                             let pc = conn.get_or_create(&peer_id);
                             match &mut pc.session {
-                                SessionState::Established(ref mut session) => {
+                                SessionState::Established(session) => {
                                     let pt = noise::decrypt(session, payload)?;
-                                    return Ok((peer_id, pt));
+                                    return Ok((source, pt));
                                 }
                                 _ => {
-                                    // Try previous session (during rekey transition)
-                                    if let Some(ref mut prev) = pc.previous_session {
+                                    if let Some(prev) = pc.previous_session.as_mut() {
                                         if let Ok(pt) = noise::decrypt(prev, payload) {
-                                            return Ok((peer_id, pt));
+                                            return Ok((source, pt));
                                         }
                                     }
                                     eprintln!("no session for V2 transport from {}", peer_id);
@@ -264,32 +283,77 @@ impl Transport {
                     }
                 }
                 0x01 => {
-                    // Legacy V1 packet — no longer supported
-                    let (_ver, _src, _dst, nonce, _ct) = crypto::decode_wire_packet(&raw)?;
+                    let (_ver, src, dst, nonce, _ct) = crypto::decode_wire_packet(&raw)?;
+                    if dst != self.my_wire_id() {
+                        eprintln!(
+                            "dropping legacy V1 packet for different destination {}",
+                            hex::encode(dst)
+                        );
+                        continue;
+                    }
+                    let source = match self.resolve_packet_source(raw_source, src).await {
+                        Ok(source) => source,
+                        Err(err) => {
+                            eprintln!("discarding V1 packet: {}", err);
+                            continue;
+                        }
+                    };
                     eprintln!(
                         "received legacy V1 packet from {} (nonce {}), dropping — upgrade peer",
-                        peer_id, nonce
+                        source.node_id(),
+                        nonce
                     );
                     continue;
                 }
-                v => {
-                    eprintln!("unknown packet version: {}", v);
+                version => {
+                    eprintln!("unknown packet version: {}", version);
                     continue;
                 }
             }
         }
     }
 
+    async fn resolve_packet_source(
+        &self,
+        raw_source: RawPacketSource,
+        src_wire_id: [u8; 20],
+    ) -> Result<PacketSourceIdentity, String> {
+        match raw_source {
+            RawPacketSource::Derp(node_id) => {
+                let expected_wire_id = crypto::node_id_wire_id(&node_id);
+                if expected_wire_id != src_wire_id {
+                    return Err(format!(
+                        "DERP source {} did not match packet header {}",
+                        node_id,
+                        hex::encode(src_wire_id)
+                    ));
+                }
+                Ok(PacketSourceIdentity::Derp { node_id })
+            }
+            RawPacketSource::Udp => {
+                let conn = self.conn.lock().await;
+                let node_id = conn.resolve_peer_id(&src_wire_id).ok_or_else(|| {
+                    format!(
+                        "unresolved direct packet source {}; no cached node identity",
+                        hex::encode(src_wire_id)
+                    )
+                })?;
+                Ok(PacketSourceIdentity::Direct {
+                    node_id,
+                    src_wire_id,
+                })
+            }
+        }
+    }
+
     /// Receive raw bytes from any path (DERP or UDP).
-    async fn recv_raw(&self) -> Result<(String, Vec<u8>), String> {
-        // Try DERP first, then UDP
+    async fn recv_raw(&self) -> Result<(RawPacketSource, Vec<u8>), String> {
         if let Some(client) = self.derp.as_ref() {
             if let Ok((src_id, data)) = client.recv().await {
-                return Ok((src_id, data));
+                return Ok((RawPacketSource::Derp(src_id), data));
             }
         }
 
-        // UDP fallback
         if let Some(ref udp) = self.udp {
             let mut buf = vec![0u8; 65536];
             let (len, _addr) = udp
@@ -297,19 +361,114 @@ impl Transport {
                 .await
                 .map_err(|e| format!("UDP recv: {}", e))?;
             buf.truncate(len);
-            // For UDP we don't know the peer_id string from the wire;
-            // it will be resolved from the packet src_id field by the caller
-            let src_hex = if buf.len() > 22 {
-                match buf[0] {
-                    0x02 => hex::encode(&buf[2..22]),
-                    _ => hex::encode(&buf[1..21]),
-                }
-            } else {
-                "unknown".to_string()
-            };
-            Ok((src_hex, buf))
+            Ok((RawPacketSource::Udp, buf))
         } else {
             Err("no receive path available".to_string())
         }
+    }
+}
+
+fn verify_remote_static_binding(
+    peer_id: &str,
+    expected_remote_key: Option<[u8; 32]>,
+    handshake: &noise::NoiseHandshake,
+) -> Result<(), String> {
+    let expected_remote_key = expected_remote_key.ok_or_else(|| {
+        format!(
+            "cannot verify handshake identity for {}; no cached coordination key",
+            peer_id
+        )
+    })?;
+    let remote_key = noise::remote_static_key(handshake)?;
+    if remote_key != expected_remote_key {
+        return Err(format!(
+            "handshake key mismatch for {}: expected {}, got {}",
+            peer_id,
+            hex::encode(expected_remote_key),
+            hex::encode(remote_key)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    use super::*;
+
+    fn test_transport(my_node_id: &str) -> Transport {
+        let signing = SigningKey::generate(&mut OsRng);
+        let x_priv = crypto::ed25519_to_x25519_private(&signing.to_bytes());
+        Transport::new_for_tests(ConnManager::new(None), None, my_node_id.to_string(), x_priv)
+    }
+
+    #[tokio::test]
+    async fn udp_source_requires_cached_node_identity() {
+        let transport = test_transport("kd_self");
+        let err = transport
+            .resolve_packet_source(RawPacketSource::Udp, crypto::node_id_wire_id("kd_peer"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("unresolved direct packet source"));
+    }
+
+    #[tokio::test]
+    async fn udp_source_resolves_to_real_node_id_when_cached() {
+        let transport = test_transport("kd_self");
+        transport.remember_peer_identity("kd_peer", [7u8; 32]).await;
+
+        let source = transport
+            .resolve_packet_source(RawPacketSource::Udp, crypto::node_id_wire_id("kd_peer"))
+            .await
+            .unwrap();
+
+        assert_eq!(source.node_id(), "kd_peer");
+        assert!(matches!(source, PacketSourceIdentity::Direct { .. }));
+    }
+
+    #[tokio::test]
+    async fn derp_source_must_match_wire_header_identity() {
+        let transport = test_transport("kd_self");
+        let err = transport
+            .resolve_packet_source(
+                RawPacketSource::Derp("kd_peer_a".to_string()),
+                crypto::node_id_wire_id("kd_peer_b"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("did not match packet header"));
+    }
+
+    #[tokio::test]
+    async fn responder_handshake_rejects_mismatched_cached_coordination_key() {
+        let responder_signing = SigningKey::generate(&mut OsRng);
+        let responder_x_priv = crypto::ed25519_to_x25519_private(&responder_signing.to_bytes());
+        let responder_x_pub =
+            crypto::ed25519_to_x25519_public(responder_signing.verifying_key().as_bytes()).unwrap();
+
+        let initiator_signing = SigningKey::generate(&mut OsRng);
+        let initiator_x_priv = crypto::ed25519_to_x25519_private(&initiator_signing.to_bytes());
+        let (_handshake, m1) =
+            noise::begin_handshake_initiator(&initiator_x_priv, &responder_x_pub).unwrap();
+
+        let transport = Transport::new_for_tests(
+            ConnManager::new(None),
+            None,
+            "kd_responder".to_string(),
+            responder_x_priv,
+        );
+        transport
+            .remember_peer_identity("kd_initiator", [9u8; 32])
+            .await;
+
+        let source = PacketSourceIdentity::Direct {
+            node_id: "kd_initiator".to_string(),
+            src_wire_id: crypto::node_id_wire_id("kd_initiator"),
+        };
+        let err = transport.handle_handshake(&source, &m1).await.unwrap_err();
+
+        assert!(err.contains("handshake key mismatch"));
     }
 }

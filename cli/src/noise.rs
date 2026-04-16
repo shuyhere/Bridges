@@ -102,10 +102,21 @@ pub fn process_handshake_message(
     }
 }
 
-/// Get the remote peer's static public key from a completed handshake.
-/// In Noise IK, the responder learns the initiator's key from M1.
-pub fn get_remote_static(handshake: &NoiseHandshake) -> Option<Vec<u8>> {
-    handshake.state.get_remote_static().map(|k| k.to_vec())
+/// Get the remote peer's static X25519 key as an exact 32-byte array.
+pub fn remote_static_key(handshake: &NoiseHandshake) -> Result<[u8; 32], String> {
+    let remote = handshake
+        .state
+        .get_remote_static()
+        .ok_or_else(|| "handshake did not expose remote static key".to_string())?;
+    if remote.len() != 32 {
+        return Err(format!(
+            "handshake remote static key has invalid length {}",
+            remote.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(remote);
+    Ok(out)
 }
 
 /// Finalize a completed handshake into a transport session.

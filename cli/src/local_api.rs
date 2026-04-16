@@ -212,6 +212,7 @@ async fn encrypt_and_send(
         }
         let mut x_pub = [0u8; 32];
         x_pub.copy_from_slice(&decoded);
+        state.transport.remember_peer_identity(peer_id, x_pub).await;
         let blob = crate::crypto::encrypt_mailbox_payload(
             &state.node_id,
             peer_id,
@@ -254,6 +255,7 @@ async fn encrypt_and_send(
             return Err("x25519 pubkey wrong length".to_string());
         }
         x_pub.copy_from_slice(&decoded);
+        state.transport.remember_peer_identity(peer_id, x_pub).await;
         if let Err(e) = state.transport.handshake(peer_id, &x_pub).await {
             eprintln!(
                 "  direct handshake to {} failed ({}), using server relay",

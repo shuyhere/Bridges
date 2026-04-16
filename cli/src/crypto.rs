@@ -8,6 +8,14 @@ use sha2::{Digest, Sha256, Sha512};
 type WirePacketV1<'a> = (u8, [u8; 20], [u8; 20], u64, &'a [u8]);
 type WirePacketV2<'a> = (u8, u8, [u8; 20], [u8; 20], &'a [u8]);
 
+/// Derive the stable 20-byte wire identifier used inside transport packets.
+pub fn node_id_wire_id(node_id: &str) -> [u8; 20] {
+    let mut out = [0u8; 20];
+    let hash = Sha256::digest(node_id.as_bytes());
+    out.copy_from_slice(&hash[..20]);
+    out
+}
+
 /// Convert Ed25519 private key to X25519 via SHA-512 clamping (RFC 7748).
 pub fn ed25519_to_x25519_private(signing_key: &[u8; 32]) -> [u8; 32] {
     let hash = Sha512::digest(signing_key);
