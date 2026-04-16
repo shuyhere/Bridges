@@ -52,7 +52,9 @@ async fn get_keys(
     Query(q): Query<KeysQuery>,
     Path(node_id): Path<String>,
 ) -> Result<Json<KeysResp>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let allowed = if let Some(project_id) = q.project {
         db.query_row(
             "SELECT 1 FROM server_members m1 \
@@ -97,7 +99,9 @@ async fn list_keys(
     Query(q): Query<KeysQuery>,
 ) -> Result<Json<Vec<KeysResp>>, StatusCode> {
     let project_id = q.project.ok_or(StatusCode::BAD_REQUEST)?;
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Verify caller is a member of the project
     let is_member: bool = db
         .query_row(
@@ -136,7 +140,9 @@ async fn update_keys(
     Extension(auth): Extension<AuthNode>,
     Json(req): Json<UpdateKeysReq>,
 ) -> Result<StatusCode, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
         "UPDATE registered_nodes SET ed25519_pubkey = ?1, x25519_pubkey = ?2 WHERE node_id = ?3",
         rusqlite::params![req.ed25519_pubkey, req.x25519_pubkey, auth.0],

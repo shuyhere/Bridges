@@ -8,15 +8,31 @@ pub mod skills;
 
 use axum::Router;
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::ServerInitError;
 
 /// Shared state for all server routes.
 pub struct ServerState {
-    pub db: Mutex<Connection>,
+    pub db_path: PathBuf,
+}
+
+impl ServerState {
+    pub fn open_connection(&self) -> Result<Connection, rusqlite::Error> {
+        Connection::open(&self.db_path)
+    }
+}
+
+#[cfg(test)]
+pub fn make_test_state() -> Arc<ServerState> {
+    let db_path =
+        std::env::temp_dir().join(format!("bridges-serve-test-{}.db", uuid::Uuid::new_v4()));
+    let conn = Connection::open(&db_path).unwrap();
+    init_server_db(&conn).unwrap();
+    drop(conn);
+    Arc::new(ServerState { db_path })
 }
 
 /// Initialize the server database schema.
@@ -198,9 +214,10 @@ async fn health() -> axum::Json<serde_json::Value> {
 pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
     init_server_db(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
 
     let state = Arc::new(ServerState {
-        db: Mutex::new(conn),
+        db_path: Path::new(db_path).to_path_buf(),
     });
     let app = router(state);
     let addr = format!("0.0.0.0:{}", port);

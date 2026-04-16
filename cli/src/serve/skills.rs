@@ -46,7 +46,9 @@ async fn register_skill(
     let skill_id = format!("skill_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
 
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
         "INSERT INTO server_skills (skill_id, project_id, node_id, name, description, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -67,7 +69,9 @@ async fn list_skills(
     State(state): State<Arc<ServerState>>,
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<SkillResp>>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut stmt = db
         .prepare(
             "SELECT skill_id, node_id, name, description, created_at \

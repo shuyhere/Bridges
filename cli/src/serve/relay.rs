@@ -160,7 +160,9 @@ async fn broadcast_message(
 ) -> Result<Json<BroadcastResp>, StatusCode> {
     // Verify sender is a member of the project
     let is_member: bool = {
-        let db = state.db.lock().await;
+        let db = state
+            .open_connection()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let mut stmt = db
             .prepare("SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

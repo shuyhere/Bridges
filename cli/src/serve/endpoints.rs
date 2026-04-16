@@ -34,7 +34,9 @@ async fn get_endpoints(
     Extension(auth): Extension<AuthNode>,
     Path(node_id): Path<String>,
 ) -> Result<Json<Vec<EndpointHint>>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     // Verify caller shares at least one project with the target node
     let shares_project: bool = db
         .query_row(
@@ -65,7 +67,9 @@ async fn update_endpoints(
     Json(hints): Json<Vec<EndpointHint>>,
 ) -> Result<StatusCode, StatusCode> {
     let json = serde_json::to_string(&hints).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
         "UPDATE registered_nodes SET endpoint_hints = ?1 WHERE node_id = ?2",
         rusqlite::params![json, auth.0],

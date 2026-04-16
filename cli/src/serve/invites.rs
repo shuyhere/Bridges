@@ -71,7 +71,9 @@ pub async fn create_invite_handler(
     let token_hash = hash_token(&token);
     let now = chrono::Utc::now().to_rfc3339();
 
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
@@ -107,7 +109,9 @@ pub async fn join_project_handler(
     let joining_node = auth.0;
     let role = req.agent_role.unwrap_or_else(|| "member".to_string());
 
-    let mut db = state.db.lock().await;
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let tx = db
         .transaction()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -171,7 +175,9 @@ pub async fn list_invites_handler(
     Extension(auth): Extension<AuthNode>,
     Path(project_id): Path<String>,
 ) -> Result<Json<Vec<InviteListItem>>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
@@ -208,14 +214,8 @@ mod tests {
     use super::*;
     use axum::extract::{Path, State};
     use axum::Extension;
-    use tokio::sync::Mutex;
-
     fn test_state() -> Arc<ServerState> {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        super::super::init_server_db(&conn).unwrap();
-        Arc::new(ServerState {
-            db: Mutex::new(conn),
-        })
+        super::super::make_test_state()
     }
 
     async fn seed_project_and_invite(
@@ -226,7 +226,7 @@ mod tests {
         max_uses: Option<i64>,
         use_count: i64,
     ) {
-        let db = state.db.lock().await;
+        let db = state.open_connection().unwrap();
         db.execute(
             "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![project_id, "proj", "proj", Option::<String>::None, owner_node_id, chrono::Utc::now().to_rfc3339()],
@@ -253,7 +253,7 @@ mod tests {
     }
 
     async fn read_use_count(state: &Arc<ServerState>, project_id: &str) -> i64 {
-        let db = state.db.lock().await;
+        let db = state.open_connection().unwrap();
         db.query_row(
             "SELECT use_count FROM server_invites WHERE project_id = ?1",
             rusqlite::params![project_id],
@@ -334,7 +334,7 @@ mod tests {
         seed_project_and_invite(&state, project_id, owner, invite_token, Some(1), 1).await;
 
         {
-            let db = state.db.lock().await;
+            let db = state.open_connection().unwrap();
             db.execute(
                 "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'member', ?3)",
                 rusqlite::params![project_id, member, chrono::Utc::now().to_rfc3339()],

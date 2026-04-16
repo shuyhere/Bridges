@@ -74,7 +74,9 @@ async fn create_project(
     let project_id = format!("proj_{}", uuid::Uuid::new_v4());
     let now = chrono::Utc::now().to_rfc3339();
 
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.execute(
         "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -103,7 +105,9 @@ async fn list_projects(
     State(state): State<Arc<ServerState>>,
     Extension(auth): Extension<AuthNode>,
 ) -> Result<Json<Vec<ProjectResp>>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut stmt = db
         .prepare(
             "SELECT p.project_id, p.slug, p.display_name, p.description, p.created_by, p.created_at \
@@ -134,7 +138,9 @@ async fn get_project(
     Extension(auth): Extension<AuthNode>,
     Path(id): Path<String>,
 ) -> Result<Json<ProjectResp>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
@@ -169,7 +175,9 @@ async fn list_members(
     Extension(auth): Extension<AuthNode>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<MemberResp>>, StatusCode> {
-    let db = state.db.lock().await;
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let is_member: bool = db
         .query_row(
             "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
