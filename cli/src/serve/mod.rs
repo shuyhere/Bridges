@@ -6,10 +6,13 @@ pub mod projects;
 pub mod relay;
 pub mod skills;
 
+use axum::extract::ws::Message;
 use axum::Router;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::ServerInitError;
@@ -17,9 +20,17 @@ use crate::error::ServerInitError;
 /// Shared state for all server routes.
 pub struct ServerState {
     pub db_path: PathBuf,
+    pub derp_clients: Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>,
 }
 
 impl ServerState {
+    pub fn new(db_path: PathBuf) -> Self {
+        Self {
+            db_path,
+            derp_clients: Mutex::new(HashMap::new()),
+        }
+    }
+
     pub fn open_connection(&self) -> Result<Connection, rusqlite::Error> {
         Connection::open(&self.db_path)
     }
@@ -32,7 +43,7 @@ pub fn make_test_state() -> Arc<ServerState> {
     let conn = Connection::open(&db_path).unwrap();
     init_server_db(&conn).unwrap();
     drop(conn);
-    Arc::new(ServerState { db_path })
+    Arc::new(ServerState::new(db_path))
 }
 
 /// Initialize the server database schema.
@@ -216,9 +227,7 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
     init_server_db(&conn).map_err(|e| e.to_string())?;
     drop(conn);
 
-    let state = Arc::new(ServerState {
-        db_path: Path::new(db_path).to_path_buf(),
-    });
+    let state = Arc::new(ServerState::new(Path::new(db_path).to_path_buf()));
     let app = router(state);
     let addr = format!("0.0.0.0:{}", port);
     println!("Bridges coordination server on {}", addr);
@@ -277,4 +286,16 @@ CREATE TABLE IF NOT EXISTS server_skills (
     description     TEXT,
     created_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS server_mailbox (
+    message_id      TEXT PRIMARY KEY,
+    target_node_id  TEXT NOT NULL,
+    from_node_id    TEXT NOT NULL,
+    blob            TEXT NOT NULL,
+    project_id      TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_server_mailbox_target_created
+    ON server_mailbox (target_node_id, created_at);
 "#;
