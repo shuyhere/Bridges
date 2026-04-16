@@ -26,7 +26,7 @@ pub struct RelayReq {
     pub blob: String,
     /// Optional project ID for authorization-aware decrypt/key lookup on clients.
     #[serde(rename = "projectId")]
-    pub project_id: Option<String>,
+    pub _project_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -117,7 +117,7 @@ async fn relay_message(
     let entry = MailboxEntry {
         from: auth.0,
         blob: req.blob,
-        project_id: req.project_id,
+        project_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -175,6 +175,7 @@ async fn broadcast_message(
 /// Fetch and atomically drain pending encrypted messages for this node.
 /// Delivery semantics: queued mailbox entries survive process restarts until fetched,
 /// and a successful fetch removes exactly the messages returned in that response.
+/// To minimize coordination-visible metadata, mailbox entries do not retain project IDs.
 async fn fetch_mailbox(
     State(state): State<Arc<ServerState>>,
     Extension(auth): Extension<AuthNode>,
@@ -323,7 +324,7 @@ fn enqueue_broadcast_entries(
                 node_id,
                 from_node_id,
                 blob,
-                req.project_id,
+                Option::<String>::None,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )?;
@@ -402,7 +403,7 @@ mod tests {
             Json(RelayReq {
                 target_node_id: "receiver".to_string(),
                 blob: "hello".to_string(),
-                project_id: Some("proj_1".to_string()),
+                _project_id: Some("proj_1".to_string()),
             }),
         )
         .await
@@ -420,7 +421,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].from, "sender");
         assert_eq!(messages[0].blob, "hello");
-        assert_eq!(messages[0].project_id.as_deref(), Some("proj_1"));
+        assert_eq!(messages[0].project_id, None);
     }
 
     #[tokio::test]
@@ -435,7 +436,7 @@ mod tests {
                 Json(RelayReq {
                     target_node_id: "receiver".to_string(),
                     blob: blob.to_string(),
-                    project_id: None,
+                    _project_id: None,
                 }),
             )
             .await

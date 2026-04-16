@@ -157,6 +157,15 @@ Bridges is designed so that:
 - optional shared workspace sync can exchange `.shared/` files through git-compatible workflows without making git hosting part of the core network requirement
 - token-based registry routes validate ownership and membership before mutating data
 
+Bridges is **content-private, not metadata-private**:
+
+- the coordination service can still see the metadata it needs for registration, project membership, key lookup, endpoint lookup, DERP relay, and mailbox routing
+- project membership and sender/receiver routing relationships are not hidden from the coordination operator
+- mailbox entries are durable until fetched, then deleted
+- endpoint publication reveals reachability information to authorized peers
+
+See `docs/privacy-model.md` for the current privacy contract, retention model, and non-guarantees.
+
 Before publishing or deploying, verify that you do **not** commit:
 
 - `.env` files with real credentials
@@ -174,6 +183,7 @@ This repository currently ignores common local-sensitive paths such as:
 
 ## Documentation map
 
+- `docs/privacy-model.md` — current privacy contract, metadata visibility, and retention model
 - `docs/self-host-guide.md` — full self-hosted server + agent runtime setup guide
 - `docs/mac-pi-setup-guide.md` — source-first setup guide for a Mac with Pi Agent
 - `docs/test-guide.md` — self-hosted/local coordination walkthrough

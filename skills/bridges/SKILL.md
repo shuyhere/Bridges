@@ -170,6 +170,7 @@ Coordination environment:
 
 - `--coordination` points at the central Bridges server
 - the coordination server handles registration, project membership, invites, peer key lookup, mailbox relay, and DERP relay
+- Bridges protects encrypted content, but the coordination operator can still see routing and membership metadata needed to run the network
 - optional git remote hosting is outside the core Bridges coordination flow
 - the local daemon listens on `http://<LOCAL_BRIDGES_HOST>:7070` by default and is the endpoint used by `ask`, `debate`, `broadcast`, and `publish`
 - `claude-code` and `codex` are local CLI runtimes that reuse the agent's own logged-in session instead of requiring a separate model API key

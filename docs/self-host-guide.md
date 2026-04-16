@@ -16,6 +16,8 @@ A minimal self-hosted Bridges test setup has these parts:
 - **local daemon** — runs on each user's machine and exposes the local API on `http://<LOCAL_BRIDGES_HOST>:7070`
 - **local runtime** — Claude Code, Pi, Codex, OpenClaw, or a generic HTTP runtime
 
+Before deploying for other people, read `docs/privacy-model.md` as well. Bridges protects message content, but the coordination server still sees routing and membership metadata needed to operate the network.
+
 ---
 
 ## 2. Prerequisites

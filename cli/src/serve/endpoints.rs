@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::auth::{auth_middleware, AuthNode};
 use super::ServerState;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EndpointHint {
     pub addr: String,
     #[serde(rename = "hintType")]
@@ -76,4 +76,91 @@ async fn update_endpoints(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_project_membership(state: &Arc<ServerState>, project_id: &str, node_ids: &[&str]) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![project_id, project_id, project_id, Option::<String>::None, node_ids[0], chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        for node_id in node_ids {
+            db.execute(
+                "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'member', ?3)",
+                rusqlite::params![project_id, node_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+    }
+
+    fn seed_endpoint_hints(state: &Arc<ServerState>, node_id: &str, hints: &[EndpointHint]) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT INTO registered_nodes (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, api_key_hash, endpoint_hints, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                node_id,
+                "ed_pub",
+                "x_pub",
+                Option::<String>::None,
+                Option::<String>::None,
+                "hash",
+                serde_json::to_string(hints).unwrap(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_endpoints_requires_shared_project() {
+        let state = super::super::make_test_state();
+        seed_endpoint_hints(
+            &state,
+            "kd_target",
+            &[EndpointHint {
+                addr: "198.51.100.10:7000".to_string(),
+                hint_type: "stun".to_string(),
+            }],
+        );
+
+        let result = get_endpoints(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Path("kd_target".to_string()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_endpoints_returns_hints_to_shared_project_member() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_privacy", &["kd_viewer", "kd_target"]);
+        seed_endpoint_hints(
+            &state,
+            "kd_target",
+            &[EndpointHint {
+                addr: "198.51.100.10:7000".to_string(),
+                hint_type: "stun".to_string(),
+            }],
+        );
+
+        let response = get_endpoints(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Path("kd_target".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].addr, "198.51.100.10:7000");
+    }
 }

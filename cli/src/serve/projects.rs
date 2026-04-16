@@ -16,7 +16,7 @@ pub struct CreateProjectReq {
     pub description: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ProjectResp {
     #[serde(rename = "projectId")]
     pub project_id: String,
@@ -30,7 +30,7 @@ pub struct ProjectResp {
     pub created_at: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct MemberResp {
     #[serde(rename = "nodeId")]
     pub node_id: String,
@@ -210,4 +210,84 @@ async fn list_members(
         .filter_map(|r| r.ok())
         .collect();
     Ok(Json(members))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_project(state: &Arc<ServerState>, project_id: &str, members: &[(&str, &str)]) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![project_id, project_id, project_id, Option::<String>::None, members[0].0, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        for (node_id, role) in members {
+            db.execute(
+                "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![project_id, node_id, role, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO registered_nodes (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, api_key_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    node_id,
+                    format!("ed_{}", node_id),
+                    format!("x_{}", node_id),
+                    format!("display-{}", node_id),
+                    Option::<String>::None,
+                    format!("hash_{}", node_id),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_members_requires_project_membership() {
+        let state = super::super::make_test_state();
+        seed_project(
+            &state,
+            "proj_members",
+            &[("kd_owner", "owner"), ("kd_member", "member")],
+        );
+
+        let result = list_members(
+            State(state),
+            Extension(AuthNode("kd_outsider".to_string())),
+            Path("proj_members".to_string()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_members_returns_member_metadata_to_project_member() {
+        let state = super::super::make_test_state();
+        seed_project(
+            &state,
+            "proj_members",
+            &[("kd_owner", "owner"), ("kd_member", "member")],
+        );
+
+        let members = list_members(
+            State(state),
+            Extension(AuthNode("kd_owner".to_string())),
+            Path("proj_members".to_string()),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let member = members
+            .iter()
+            .find(|member| member.node_id == "kd_member")
+            .unwrap();
+        assert_eq!(member.agent_role.as_deref(), Some("member"));
+        assert_eq!(member.display_name.as_deref(), Some("display-kd_member"));
+        assert_eq!(member.ed25519_pubkey.as_deref(), Some("ed_kd_member"));
+    }
 }

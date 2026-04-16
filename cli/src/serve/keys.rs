@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::auth::{auth_middleware, AuthNode};
 use super::ServerState;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct KeysResp {
     #[serde(rename = "nodeId")]
     pub node_id: String,
@@ -149,4 +149,98 @@ async fn update_keys(
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_project_membership(state: &Arc<ServerState>, project_id: &str, node_ids: &[&str]) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![project_id, project_id, project_id, Option::<String>::None, node_ids[0], chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        for node_id in node_ids {
+            db.execute(
+                "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, 'member', ?3)",
+                rusqlite::params![project_id, node_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+    }
+
+    fn seed_registered_node(state: &Arc<ServerState>, node_id: &str, ed25519_pubkey: &str) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT INTO registered_nodes (node_id, ed25519_pubkey, x25519_pubkey, display_name, owner_name, api_key_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                node_id,
+                ed25519_pubkey,
+                "x25519_pub",
+                Option::<String>::None,
+                Option::<String>::None,
+                "hash",
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_keys_requires_shared_project() {
+        let state = super::super::make_test_state();
+        seed_registered_node(&state, "kd_target", "ed_target");
+
+        let result = get_keys(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Query(KeysQuery { project: None }),
+            Path("kd_target".to_string()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_keys_requires_project_membership() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_keys", &["kd_target"]);
+        seed_registered_node(&state, "kd_target", "ed_target");
+
+        let result = list_keys(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Query(KeysQuery {
+                project: Some("proj_keys".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_keys_returns_member_keys_for_project_member() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_keys", &["kd_viewer", "kd_target"]);
+        seed_registered_node(&state, "kd_target", "ed_target");
+
+        let keys = list_keys(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Query(KeysQuery {
+                project: Some("proj_keys".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(keys
+            .iter()
+            .any(|key| { key.node_id == "kd_target" && key.ed25519_pubkey == "ed_target" }));
+    }
 }
