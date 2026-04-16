@@ -176,6 +176,7 @@ Coordination environment:
 - `claude-code` and `codex` are local CLI runtimes that reuse the agent's own logged-in session instead of requiring a separate model API key
 - `openclaw` and `generic` are HTTP runtimes and may require explicit endpoint and token configuration
 - message delivery may use direct encrypted transport or coordination-server mailbox fallback depending on connectivity
+- `ask` is single-target request/response; `debate`, `broadcast`, and `publish` are fanout flows and may partially succeed across project members
 - for a stable always-on backend daemon, prefer `bridges service install` over relying on auto-spawn
 
 ### Background Daemon Service

@@ -184,6 +184,7 @@ This repository currently ignores common local-sensitive paths such as:
 ## Documentation map
 
 - `docs/privacy-model.md` — current privacy contract, metadata visibility, and retention model
+- `docs/delivery-semantics.md` — current guarantees and non-guarantees for ask, debate, broadcast, and publish
 - `docs/self-host-guide.md` — full self-hosted server + agent runtime setup guide
 - `docs/mac-pi-setup-guide.md` — source-first setup guide for a Mac with Pi Agent
 - `docs/test-guide.md` — self-hosted/local coordination walkthrough

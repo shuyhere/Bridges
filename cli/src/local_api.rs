@@ -415,6 +415,11 @@ async fn handle_send(
     }
 }
 
+/// Delivery semantics for `ask`:
+/// - single-target request/response
+/// - success means the request was handed to direct transport or mailbox relay, not that the peer processed it yet
+/// - no automatic retry or deduplication is performed here
+/// - responses are matched by `requestId` and pending entries expire locally after a short timeout
 async fn handle_ask(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<AskRequest>,
@@ -501,6 +506,12 @@ async fn handle_ask(
     }
 }
 
+/// Delivery semantics for `broadcast`:
+/// - fanout to all other project members
+/// - per-peer direct transport is attempted first, with mailbox relay fallback
+/// - partial success returns HTTP 200 with `ok=false` and the successfully delivered `sent_to` list
+/// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
+/// - no retry, deduplication, or global ordering guarantee is provided
 async fn handle_broadcast(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<BroadcastRequest>,
@@ -590,6 +601,12 @@ async fn handle_broadcast(
     )
 }
 
+/// Delivery semantics for `debate`:
+/// - fanout request/response to all other project members
+/// - each successfully delivered peer gets its own `requestId`
+/// - partial success returns HTTP 200 with `ok=false`, plus only the `request_ids` that were actually sent
+/// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
+/// - no retry, deduplication, or cross-peer ordering guarantee is provided
 async fn handle_debate(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<DebateRequest>,
@@ -696,6 +713,12 @@ async fn handle_debate(
     )
 }
 
+/// Delivery semantics for `publish`:
+/// - fanout artifact delivery to all other project members
+/// - success means the payload was handed to direct transport or mailbox relay for that peer
+/// - partial success returns HTTP 200 with `ok=false` and the successfully delivered `sent_to` list
+/// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
+/// - no retry or deduplication is provided at this layer
 async fn handle_publish(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<PublishRequest>,
@@ -849,6 +872,7 @@ mod tests {
     use crate::crypto;
     use crate::transport::Transport;
     use axum::body::to_bytes;
+    use base64::Engine;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     use std::sync::Arc;
@@ -858,6 +882,7 @@ mod tests {
         peer_x25519_pub: String,
         relayed: Arc<Mutex<Vec<RelayReq>>>,
         relay_error: Option<String>,
+        relay_errors_by_target: std::collections::HashMap<String, String>,
         project_members: Vec<MemberInfo>,
     }
 
@@ -879,6 +904,18 @@ mod tests {
         }
 
         async fn get_project_keys(&self, project_id: &str) -> Result<Vec<PeerKeys>, String> {
+            if project_id == "proj_test" && !self.project_members.is_empty() {
+                return Ok(self
+                    .project_members
+                    .iter()
+                    .filter(|member| member.node_id != "kd_sender")
+                    .map(|member| PeerKeys {
+                        node_id: member.node_id.clone(),
+                        ed25519_pub: "unused".to_string(),
+                        x25519_pub: self.peer_x25519_pub.clone(),
+                    })
+                    .collect());
+            }
             Ok(vec![PeerKeys {
                 node_id: if project_id == "proj_test" {
                     "kd_peer".to_string()
@@ -901,6 +938,9 @@ mod tests {
                 blob: blob.to_string(),
                 project_id: project_id.map(str::to_string),
             });
+            if let Some(err) = self.relay_errors_by_target.get(target_node_id) {
+                return Err(err.clone());
+            }
             if let Some(err) = &self.relay_error {
                 return Err(err.clone());
             }
@@ -938,6 +978,14 @@ mod tests {
         (status, json)
     }
 
+    fn member(node_id: &str) -> MemberInfo {
+        MemberInfo {
+            node_id: node_id.to_string(),
+            display_name: Some(format!("display-{node_id}")),
+            role: Some("member".to_string()),
+        }
+    }
+
     #[tokio::test]
     async fn encrypt_and_send_relays_when_direct_handshake_is_unavailable() {
         let peer_signing = SigningKey::generate(&mut OsRng);
@@ -948,6 +996,7 @@ mod tests {
             peer_x25519_pub: hex::encode(peer_x25519),
             relayed: relayed.clone(),
             relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
             project_members: Vec::new(),
         });
 
@@ -1006,6 +1055,7 @@ mod tests {
             peer_x25519_pub: hex::encode(peer_x25519),
             relayed: Arc::new(Mutex::new(Vec::new())),
             relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
             project_members: Vec::new(),
         })));
 
@@ -1035,6 +1085,7 @@ mod tests {
             peer_x25519_pub: hex::encode(peer_x25519),
             relayed: Arc::new(Mutex::new(Vec::new())),
             relay_error: Some("relay unavailable".to_string()),
+            relay_errors_by_target: std::collections::HashMap::new(),
             project_members: Vec::new(),
         })));
 
@@ -1066,6 +1117,7 @@ mod tests {
             peer_x25519_pub: hex::encode(peer_x25519),
             relayed: Arc::new(Mutex::new(Vec::new())),
             relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
             project_members: Vec::new(),
         })));
 
@@ -1088,5 +1140,115 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .starts_with("data must be valid base64:"));
+    }
+
+    #[tokio::test]
+    async fn handle_broadcast_returns_partial_success_with_ok_false() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let mut relay_errors = std::collections::HashMap::new();
+        relay_errors.insert("kd_peer_b".to_string(), "relay unavailable".to_string());
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: relay_errors,
+            project_members: vec![
+                member("kd_sender"),
+                member("kd_peer_a"),
+                member("kd_peer_b"),
+            ],
+        })));
+
+        let (status, json) = response_json(
+            handle_broadcast(
+                State(state),
+                Json(BroadcastRequest {
+                    message: "hello team".to_string(),
+                    project_id: "proj_test".to_string(),
+                    message_type: "broadcast".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["sent_to"], serde_json::json!(["kd_peer_a"]));
+        assert_eq!(json["error"], "relay unavailable");
+    }
+
+    #[tokio::test]
+    async fn handle_debate_returns_request_ids_only_for_delivered_peers() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let mut relay_errors = std::collections::HashMap::new();
+        relay_errors.insert("kd_peer_b".to_string(), "relay unavailable".to_string());
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: relay_errors,
+            project_members: vec![
+                member("kd_sender"),
+                member("kd_peer_a"),
+                member("kd_peer_b"),
+            ],
+        })));
+
+        let (status, json) = response_json(
+            handle_debate(
+                State(state.clone()),
+                Json(DebateRequest {
+                    topic: "What should we ship next?".to_string(),
+                    project_id: "proj_test".to_string(),
+                    new_session: false,
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["sent_to"], serde_json::json!(["kd_peer_a"]));
+        assert_eq!(json["error"], "relay unavailable");
+        assert_eq!(json["request_ids"].as_array().map(|v| v.len()), Some(1));
+        assert_eq!(state.responses.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_publish_returns_bad_gateway_when_nothing_delivered() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: Some("relay unavailable".to_string()),
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![member("kd_sender"), member("kd_peer_a")],
+        })));
+
+        let (status, json) = response_json(
+            handle_publish(
+                State(state),
+                Json(PublishRequest {
+                    filename: "artifact.txt".to_string(),
+                    data: base64::engine::general_purpose::STANDARD.encode("hello"),
+                    project_id: "proj_test".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["sent_to"], serde_json::json!([]));
+        assert_eq!(json["error"], "relay unavailable");
     }
 }
