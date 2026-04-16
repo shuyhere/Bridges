@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use chrono::Utc;
+
 use crate::coord_client::CoordClient;
 use crate::crypto;
 use crate::mdns;
@@ -20,7 +22,9 @@ pub enum ConnState {
     Idle,
     TryingLan,
     TryingDirect,
-    Connected,
+    ConnectedLan,
+    ConnectedDirect,
+    ConnectedRelay,
 }
 
 /// Noise session state for a peer.
@@ -43,6 +47,8 @@ pub struct PeerConn {
     pub previous_session: Option<NoiseSession>,
     /// Expected X25519 public key for this node as resolved from coordination.
     pub expected_x25519_pub: Option<[u8; 32]>,
+    pub last_inbound_at: Option<String>,
+    pub last_outbound_at: Option<String>,
 }
 
 impl PeerConn {
@@ -52,6 +58,8 @@ impl PeerConn {
             session: SessionState::None,
             previous_session: None,
             expected_x25519_pub: None,
+            last_inbound_at: None,
+            last_outbound_at: None,
         }
     }
 }
@@ -100,6 +108,16 @@ impl ConnManager {
             .and_then(|pc| pc.expected_x25519_pub)
     }
 
+    pub fn note_inbound(&mut self, peer_id: &str) {
+        let pc = self.get_or_create(peer_id);
+        pc.last_inbound_at = Some(Utc::now().to_rfc3339());
+    }
+
+    pub fn note_outbound(&mut self, peer_id: &str) {
+        let pc = self.get_or_create(peer_id);
+        pc.last_outbound_at = Some(Utc::now().to_rfc3339());
+    }
+
     /// Try LAN -> direct -> DERP in order, returning the best path found.
     pub async fn connect(&mut self, peer_id: &str) -> Result<ConnPath, String> {
         self.get_or_create(peer_id);
@@ -113,7 +131,7 @@ impl ConnManager {
             if id == peer_id {
                 let path = ConnPath::Lan(*addr);
                 if let Some(pc) = self.peers.get_mut(peer_id) {
-                    pc.state = ConnState::Connected;
+                    pc.state = ConnState::ConnectedLan;
                 }
                 return Ok(path);
             }
@@ -129,7 +147,7 @@ impl ConnManager {
                     if let Ok(addr) = ep.addr.parse::<SocketAddr>() {
                         let path = ConnPath::Direct(addr);
                         if let Some(pc) = self.peers.get_mut(peer_id) {
-                            pc.state = ConnState::Connected;
+                            pc.state = ConnState::ConnectedDirect;
                         }
                         return Ok(path);
                     }
@@ -140,7 +158,7 @@ impl ConnManager {
         // 3. Fall back to DERP relay
         let path = ConnPath::Derp;
         if let Some(pc) = self.peers.get_mut(peer_id) {
-            pc.state = ConnState::Connected;
+            pc.state = ConnState::ConnectedRelay;
         }
         Ok(path)
     }

@@ -165,6 +165,7 @@ Bridges is **content-private, not metadata-private**:
 - endpoint publication reveals reachability information to authorized peers
 
 See `docs/privacy-model.md` for the current privacy contract, retention model, and non-guarantees.
+See `docs/presence-model.md` for the current daemon/runtime/reachability status model.
 
 Before publishing or deploying, verify that you do **not** commit:
 
@@ -184,6 +185,7 @@ This repository currently ignores common local-sensitive paths such as:
 ## Documentation map
 
 - `docs/privacy-model.md` — current privacy contract, metadata visibility, and retention model
+- `docs/presence-model.md` — current daemon/runtime/reachability model and status semantics
 - `docs/delivery-semantics.md` — current guarantees and non-guarantees for ask, debate, broadcast, and publish
 - `docs/self-host-guide.md` — full self-hosted server + agent runtime setup guide
 - `docs/mac-pi-setup-guide.md` — source-first setup guide for a Mac with Pi Agent

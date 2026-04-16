@@ -15,6 +15,7 @@ mod local_api;
 mod mdns;
 mod models;
 mod noise;
+mod presence;
 mod queries;
 mod serve;
 mod service;
@@ -542,6 +543,8 @@ fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
     println!("  ed25519_pub:  {}", pubkey_b58);
     println!("  x25519_pub:   {}", hex::encode(x25519_pub));
 
+    let daemon_cfg = config::DaemonConfig::load().unwrap_or_default();
+
     // Show client config if available.
     match client_config::ClientConfig::load() {
         Ok(Some(cfg)) => {
@@ -554,6 +557,62 @@ fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
         Err(err) => {
             println!("  registered:   error");
             println!("  config error: {}", err);
+        }
+    }
+
+    let daemon_status = build_runtime_or_exit().block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .map_err(|e| format!("build client: {}", e))?;
+        let url = format!("http://127.0.0.1:{}/status", daemon_cfg.local_api_port);
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("daemon unreachable: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("daemon returned {}", resp.status()));
+        }
+        resp.json::<local_api::StatusResponse>()
+            .await
+            .map_err(|e| format!("parse daemon status: {}", e))
+    });
+
+    match daemon_status {
+        Ok(status) => {
+            println!("  daemon:       {}", status.daemon.state);
+            println!("  started_at:   {}", status.daemon.started_at);
+            println!(
+                "  coordination: {:?}{}",
+                status.coordination.state,
+                status
+                    .coordination
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({})", detail))
+                    .unwrap_or_default()
+            );
+            println!(
+                "  runtime:      {:?}{}",
+                status.runtime.state,
+                status
+                    .runtime
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({})", detail))
+                    .unwrap_or_default()
+            );
+            println!(
+                "  reachability: {:?} (endpoint_hints={}, derp_connected={}, mailbox_durable={})",
+                status.reachability.mode,
+                status.reachability.endpoint_hints_published,
+                status.reachability.derp_connected,
+                status.reachability.mailbox_durable
+            );
+        }
+        Err(err) => {
+            println!("  daemon:       offline ({})", err);
         }
     }
 

@@ -10,6 +10,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::coord_client::{CoordClient, MemberInfo, PeerKeys};
+use crate::presence::{ComponentState, ComponentStatus, PresenceState, ReachabilityStatus};
 use crate::transport::Transport;
 
 /// Pending response from a peer.
@@ -31,6 +32,7 @@ pub struct ApiState {
     pub my_x25519_priv: [u8; 32],
     /// Pending responses keyed by request_id.
     pub responses: Arc<Mutex<HashMap<String, PendingResponse>>>,
+    pub presence: Arc<Mutex<PresenceState>>,
 }
 
 #[async_trait::async_trait]
@@ -84,16 +86,32 @@ pub struct SendResponse {
     pub request_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub peer_id: String,
-    pub state: String,
+    pub connection_state: String,
+    pub reachability: String,
+    pub session_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_inbound_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_outbound_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub state: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub node_id: String,
     pub healthy: bool,
+    pub daemon: DaemonStatus,
+    pub coordination: ComponentStatus,
+    pub runtime: ComponentStatus,
+    pub reachability: ReachabilityStatus,
 }
 
 // ── Structured message requests ──
@@ -845,6 +863,35 @@ async fn handle_poll_response(
     })
 }
 
+fn connection_state_label(state: &crate::connmgr::ConnState) -> &'static str {
+    match state {
+        crate::connmgr::ConnState::Idle => "idle",
+        crate::connmgr::ConnState::TryingLan => "trying_lan",
+        crate::connmgr::ConnState::TryingDirect => "trying_direct",
+        crate::connmgr::ConnState::ConnectedLan => "connected_lan",
+        crate::connmgr::ConnState::ConnectedDirect => "connected_direct",
+        crate::connmgr::ConnState::ConnectedRelay => "connected_relay",
+    }
+}
+
+fn peer_reachability_label(state: &crate::connmgr::ConnState) -> &'static str {
+    match state {
+        crate::connmgr::ConnState::ConnectedLan => "lan",
+        crate::connmgr::ConnState::ConnectedDirect => "direct",
+        crate::connmgr::ConnState::ConnectedRelay => "relay_only",
+        crate::connmgr::ConnState::TryingLan | crate::connmgr::ConnState::TryingDirect => "probing",
+        crate::connmgr::ConnState::Idle => "unknown",
+    }
+}
+
+fn session_state_label(state: &crate::connmgr::SessionState) -> &'static str {
+    match state {
+        crate::connmgr::SessionState::None => "none",
+        crate::connmgr::SessionState::HandshakePending(_) => "handshake_pending",
+        crate::connmgr::SessionState::Established(_) => "established",
+    }
+}
+
 async fn handle_peers(State(state): State<Arc<ApiState>>) -> Json<Vec<PeerInfo>> {
     let conn = state.transport.conn.lock().await;
     let peers: Vec<PeerInfo> = conn
@@ -852,16 +899,30 @@ async fn handle_peers(State(state): State<Arc<ApiState>>) -> Json<Vec<PeerInfo>>
         .iter()
         .map(|(id, pc)| PeerInfo {
             peer_id: id.clone(),
-            state: format!("{:?}", pc.state),
+            connection_state: connection_state_label(&pc.state).to_string(),
+            reachability: peer_reachability_label(&pc.state).to_string(),
+            session_state: session_state_label(&pc.session).to_string(),
+            last_inbound_at: pc.last_inbound_at.clone(),
+            last_outbound_at: pc.last_outbound_at.clone(),
         })
         .collect();
     Json(peers)
 }
 
 async fn handle_status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
+    let snapshot = state.presence.lock().await.snapshot();
+    let healthy = !matches!(snapshot.coordination.state, ComponentState::Degraded)
+        && !matches!(snapshot.runtime.state, ComponentState::Degraded);
     Json(StatusResponse {
         node_id: state.node_id.clone(),
-        healthy: true,
+        healthy,
+        daemon: DaemonStatus {
+            state: "online".to_string(),
+            started_at: snapshot.daemon_started_at,
+        },
+        coordination: snapshot.coordination,
+        runtime: snapshot.runtime,
+        reachability: snapshot.reachability,
     })
 }
 
@@ -967,6 +1028,7 @@ mod tests {
             node_id: "kd_sender".to_string(),
             my_x25519_priv: x_priv,
             responses: Arc::new(Mutex::new(HashMap::new())),
+            presence: Arc::new(Mutex::new(PresenceState::new(0, false))),
         }
     }
 
@@ -1014,6 +1076,7 @@ mod tests {
             node_id: "kd_sender".to_string(),
             my_x25519_priv: x_priv,
             responses: Arc::new(Mutex::new(HashMap::new())),
+            presence: Arc::new(Mutex::new(PresenceState::new(0, false))),
         };
         let payload = serde_json::json!({
             "from": "kd_sender",
@@ -1250,5 +1313,70 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["sent_to"], serde_json::json!([]));
         assert_eq!(json["error"], "relay unavailable");
+    }
+
+    #[tokio::test]
+    async fn handle_status_reports_presence_model_fields() {
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: "00".repeat(32),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: Vec::new(),
+        })));
+        {
+            let mut presence = state.presence.lock().await;
+            presence.set_reachability_inputs(0, true);
+            presence.note_coord_ok("mailbox poll succeeded");
+            presence.note_runtime_error("runtime dispatch failed");
+        }
+
+        let Json(status) = handle_status(State(state)).await;
+
+        assert_eq!(status.node_id, "kd_sender");
+        assert!(!status.healthy);
+        assert_eq!(status.daemon.state, "online");
+        assert_eq!(status.coordination.state, ComponentState::Healthy);
+        assert_eq!(status.runtime.state, ComponentState::Degraded);
+        assert_eq!(
+            status.reachability.mode,
+            crate::presence::ReachabilityMode::RelayOnly
+        );
+        assert!(status.reachability.mailbox_durable);
+    }
+
+    #[tokio::test]
+    async fn handle_peers_reports_reachability_and_last_activity() {
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: "00".repeat(32),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: Vec::new(),
+        })));
+        {
+            let mut conn = state.transport.conn.lock().await;
+            let peer = conn.get_or_create("kd_peer");
+            peer.state = crate::connmgr::ConnState::ConnectedRelay;
+            peer.last_inbound_at = Some("2026-04-16T00:00:00Z".to_string());
+            peer.last_outbound_at = Some("2026-04-16T00:00:05Z".to_string());
+            peer.session = crate::connmgr::SessionState::None;
+        }
+
+        let Json(peers) = handle_peers(State(state)).await;
+
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "kd_peer");
+        assert_eq!(peers[0].connection_state, "connected_relay");
+        assert_eq!(peers[0].reachability, "relay_only");
+        assert_eq!(peers[0].session_state, "none");
+        assert_eq!(
+            peers[0].last_inbound_at.as_deref(),
+            Some("2026-04-16T00:00:00Z")
+        );
+        assert_eq!(
+            peers[0].last_outbound_at.as_deref(),
+            Some("2026-04-16T00:00:05Z")
+        );
     }
 }

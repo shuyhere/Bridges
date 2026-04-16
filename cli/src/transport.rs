@@ -88,6 +88,16 @@ impl Transport {
         conn.remember_peer_identity(peer_id, expected_x25519_pub);
     }
 
+    async fn note_inbound_activity(&self, peer_id: &str) {
+        let mut conn = self.conn.lock().await;
+        conn.note_inbound(peer_id);
+    }
+
+    async fn note_outbound_activity(&self, peer_id: &str) {
+        let mut conn = self.conn.lock().await;
+        conn.note_outbound(peer_id);
+    }
+
     /// Send raw bytes over the best available path (no encryption).
     async fn send_raw(&self, peer_id: &str, packet: &[u8]) -> Result<(), String> {
         if let Some(client) = self.derp.as_ref() {
@@ -136,6 +146,7 @@ impl Transport {
         let dst = crypto::node_id_wire_id(peer_id);
         let packet = crypto::encode_wire_packet_v2(crypto::PACKET_HANDSHAKE, &src, &dst, &m1);
         self.send_raw(peer_id, &packet).await?;
+        self.note_outbound_activity(peer_id).await;
 
         {
             let mut conn = self.conn.lock().await;
@@ -173,7 +184,9 @@ impl Transport {
         let dst = crypto::node_id_wire_id(peer_id);
         let packet =
             crypto::encode_wire_packet_v2(crypto::PACKET_TRANSPORT, &src, &dst, &ciphertext);
-        self.send_raw(peer_id, &packet).await
+        self.send_raw(peer_id, &packet).await?;
+        self.note_outbound_activity(peer_id).await;
+        Ok(())
     }
 
     async fn fetch_expected_peer_key_from_coord(&self, peer_id: &str) -> Option<[u8; 32]> {
@@ -231,6 +244,7 @@ impl Transport {
                         crypto::encode_wire_packet_v2(crypto::PACKET_HANDSHAKE, &src, &dst, &m2);
                     drop(conn);
                     self.send_raw(from_peer, &packet).await?;
+                    self.note_outbound_activity(from_peer).await;
 
                     let session = noise::into_transport(handshake)?;
                     let mut conn = self.conn.lock().await;
@@ -271,6 +285,7 @@ impl Transport {
                         }
                     };
                     let peer_id = source.node_id().to_string();
+                    self.note_inbound_activity(&peer_id).await;
 
                     match pkt_type {
                         crypto::PACKET_HANDSHAKE => {

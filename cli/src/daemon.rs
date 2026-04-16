@@ -11,6 +11,7 @@ use crate::identity;
 use crate::listener::dispatch;
 use crate::local_api;
 use crate::mdns;
+use crate::presence::PresenceState;
 use crate::stun;
 use crate::transport::Transport;
 
@@ -277,8 +278,22 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
             Err(e) => eprintln!("  STUN {} failed: {}", server, e),
         }
     }
+    let presence = Arc::new(Mutex::new(PresenceState::new(hints.len(), false)));
     if !hints.is_empty() {
-        coord.push_endpoint_hints(&hints).await.ok();
+        match coord.push_endpoint_hints(&hints).await {
+            Ok(()) => {
+                presence
+                    .lock()
+                    .await
+                    .note_coord_ok(format!("published {} endpoint hints", hints.len()));
+            }
+            Err(err) => {
+                presence
+                    .lock()
+                    .await
+                    .note_coord_error(format!("push endpoint hints failed: {}", err));
+            }
+        }
     }
 
     // mDNS announcement
@@ -290,10 +305,15 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
         match DerpClient::connect(&derp_url, &api_key).await {
             Ok(client) => {
                 println!("  DERP relay connected");
+                presence.lock().await.note_coord_ok("DERP relay connected");
                 Some(client)
             }
             Err(e) => {
                 eprintln!("  DERP connect failed: {}", e);
+                presence
+                    .lock()
+                    .await
+                    .note_coord_error(format!("DERP connect failed: {}", e));
                 None
             }
         }
@@ -303,6 +323,11 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
 
     // Build transport
     let conn_mgr = ConnManager::new(Some(coord.clone()));
+    {
+        let mut snapshot = presence.lock().await;
+        snapshot.set_reachability_inputs(hints.len(), derp.is_some());
+    }
+
     let transport = Transport::new(conn_mgr, derp, node_id.clone(), x_priv).await?;
     let transport = Arc::new(transport);
     let prewarmed = prewarm_transport_identities(transport.as_ref(), &coord, &node_id).await;
@@ -326,6 +351,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
         node_id: node_id.clone(),
         my_x25519_priv: x_priv,
         responses: responses.clone(),
+        presence: presence.clone(),
     });
 
     // Start local API server
@@ -350,6 +376,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let recv_project_dir = cfg.project_dir.clone();
     let recv_coord = coord.clone();
     let recv_x_priv = x_priv;
+    let recv_presence = presence.clone();
     let recv_handle = tokio::spawn(async move {
         loop {
             match recv_transport.recv().await {
@@ -420,6 +447,10 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     .await
                     {
                         Ok(response) => {
+                            recv_presence
+                                .lock()
+                                .await
+                                .note_runtime_ok(format!("handled {} from {}", kind, from));
                             println!(
                                 "  {} from {} → responded ({} chars)",
                                 kind,
@@ -466,6 +497,10 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                             }
                         }
                         Err(e) => {
+                            recv_presence.lock().await.note_runtime_error(format!(
+                                "dispatch error for {} from {}: {}",
+                                kind, from, e
+                            ));
                             eprintln!("  dispatch error for {} from {}: {}", kind, from, e);
                         }
                     }
@@ -486,12 +521,30 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let poll_runtime_type = runtime_type.clone();
     let poll_runtime_endpoint = runtime_endpoint.clone();
     let poll_x_priv = x_priv;
+    let poll_presence = presence.clone();
     let poll_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let messages = match poll_coord.fetch_mailbox().await {
-                Ok(m) if !m.is_empty() => m,
-                _ => continue,
+                Ok(m) => {
+                    let detail = if m.is_empty() {
+                        "mailbox poll succeeded (empty)".to_string()
+                    } else {
+                        format!("mailbox poll succeeded ({} messages)", m.len())
+                    };
+                    poll_presence.lock().await.note_coord_ok(detail);
+                    if m.is_empty() {
+                        continue;
+                    }
+                    m
+                }
+                Err(e) => {
+                    poll_presence
+                        .lock()
+                        .await
+                        .note_coord_error(format!("mailbox poll failed: {}", e));
+                    continue;
+                }
             };
 
             println!("  mailbox: {} pending messages", messages.len());
@@ -574,6 +627,10 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                 .await
                 {
                     Ok(response) => {
+                        poll_presence
+                            .lock()
+                            .await
+                            .note_runtime_ok(format!("handled mailbox {} from {}", kind, msg_from));
                         println!(
                             "  mailbox {} from {} → responded ({} chars)",
                             kind,
@@ -611,10 +668,16 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                             ),
                         }
                     }
-                    Err(e) => eprintln!(
-                        "  mailbox dispatch error for {} from {}: {}",
-                        kind, msg_from, e
-                    ),
+                    Err(e) => {
+                        poll_presence.lock().await.note_runtime_error(format!(
+                            "mailbox dispatch error for {} from {}: {}",
+                            kind, msg_from, e
+                        ));
+                        eprintln!(
+                            "  mailbox dispatch error for {} from {}: {}",
+                            kind, msg_from, e
+                        )
+                    }
                 }
             }
         }
