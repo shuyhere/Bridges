@@ -6,9 +6,11 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{middleware, Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::auth::{auth_middleware, extract_node_id, AuthNode};
 use super::ServerState;
@@ -49,22 +51,13 @@ pub struct BroadcastResp {
 }
 
 /// Mailbox entry: stores opaque message blobs for later pickup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct MailboxEntry {
     from: String,
     blob: String,
     #[serde(rename = "projectId", skip_serializing_if = "Option::is_none")]
     project_id: Option<String>,
     timestamp: String,
-}
-
-/// In-memory mailbox: encrypted messages waiting for each node.
-static MAILBOX: std::sync::OnceLock<
-    tokio::sync::Mutex<std::collections::HashMap<String, Vec<MailboxEntry>>>,
-> = std::sync::OnceLock::new();
-
-fn mailbox() -> &'static tokio::sync::Mutex<std::collections::HashMap<String, Vec<MailboxEntry>>> {
-    MAILBOX.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,16 +84,6 @@ mod base64_serde {
     }
 }
 
-static DERP_CLIENTS: std::sync::OnceLock<
-    tokio::sync::Mutex<std::collections::HashMap<String, mpsc::UnboundedSender<Message>>>,
-> = std::sync::OnceLock::new();
-
-fn derp_clients(
-) -> &'static tokio::sync::Mutex<std::collections::HashMap<String, mpsc::UnboundedSender<Message>>>
-{
-    DERP_CLIENTS.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
 pub fn routes(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/v1/relay", post(relay_message))
@@ -114,7 +97,8 @@ pub fn routes(state: Arc<ServerState>) -> Router {
         .with_state(state)
 }
 
-/// Max messages per node in the mailbox (prevent memory DoS).
+/// Max messages per node in the mailbox.
+/// Mailbox entries are now persisted in SQLite, so this remains a durable queue bound.
 const MAX_MAILBOX_PER_NODE: usize = 1000;
 /// Max blob size (64 KB).
 const MAX_BLOB_SIZE: usize = 65536;
@@ -122,10 +106,10 @@ const MAX_BLOB_SIZE: usize = 65536;
 /// Relay a single opaque blob to a target node.
 /// End-to-end confidentiality depends on the sender encrypting the blob body.
 async fn relay_message(
+    State(state): State<Arc<ServerState>>,
     Extension(auth): Extension<AuthNode>,
     Json(req): Json<RelayReq>,
 ) -> Result<Json<RelayResp>, StatusCode> {
-    // Reject oversized blobs
     if req.blob.len() > MAX_BLOB_SIZE {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -137,13 +121,14 @@ async fn relay_message(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
 
-    let mut mb = mailbox().lock().await;
-    let queue = mb.entry(req.target_node_id.clone()).or_default();
-    // Enforce per-node mailbox limit
-    if queue.len() >= MAX_MAILBOX_PER_NODE {
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let delivered = enqueue_mailbox_entry(&mut db, &req.target_node_id, &entry)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !delivered {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
-    queue.push(entry);
 
     Ok(Json(RelayResp {
         delivered: true,
@@ -158,7 +143,6 @@ async fn broadcast_message(
     Extension(auth): Extension<AuthNode>,
     Json(req): Json<BroadcastReq>,
 ) -> Result<Json<BroadcastResp>, StatusCode> {
-    // Verify sender is a member of the project
     let is_member: bool = {
         let db = state
             .open_connection()
@@ -166,48 +150,41 @@ async fn broadcast_message(
         let mut stmt = db
             .prepare("SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2")
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        stmt.exists(rusqlite::params![req.project_id, auth.0])
+        stmt.exists(params![req.project_id, auth.0])
             .unwrap_or(false)
     };
     if !is_member {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Validate blob sizes
     for blob in req.blobs.values() {
         if blob.len() > MAX_BLOB_SIZE {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
     }
 
-    let mut mb = mailbox().lock().await;
-    let mut sent_to = Vec::new();
-    for (node_id, blob) in &req.blobs {
-        if *node_id == auth.0 {
-            continue;
-        }
-        let queue = mb.entry(node_id.clone()).or_default();
-        if queue.len() >= MAX_MAILBOX_PER_NODE {
-            continue;
-        } // skip full mailboxes
-        let entry = MailboxEntry {
-            from: auth.0.clone(),
-            blob: blob.clone(),
-            project_id: Some(req.project_id.clone()),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        queue.push(entry);
-        sent_to.push(node_id.clone());
-    }
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sent_to = enqueue_broadcast_entries(&mut db, &auth.0, &req)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(BroadcastResp { sent_to }))
 }
 
-/// Fetch and drain pending encrypted messages for this node.
-async fn fetch_mailbox(Extension(auth): Extension<AuthNode>) -> Json<Vec<MailboxEntry>> {
-    let mut mb = mailbox().lock().await;
-    let messages = mb.remove(&auth.0).unwrap_or_default();
-    Json(messages)
+/// Fetch and atomically drain pending encrypted messages for this node.
+/// Delivery semantics: queued mailbox entries survive process restarts until fetched,
+/// and a successful fetch removes exactly the messages returned in that response.
+async fn fetch_mailbox(
+    State(state): State<Arc<ServerState>>,
+    Extension(auth): Extension<AuthNode>,
+) -> Result<Json<Vec<MailboxEntry>>, StatusCode> {
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let messages =
+        drain_mailbox_entries(&mut db, &auth.0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(messages))
 }
 
 async fn derp_ws(
@@ -218,15 +195,15 @@ async fn derp_ws(
     let node_id = extract_node_id(&state, &headers)
         .await
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    Ok(ws.on_upgrade(move |socket| handle_derp_socket(node_id, socket)))
+    Ok(ws.on_upgrade(move |socket| handle_derp_socket(state, node_id, socket)))
 }
 
-async fn handle_derp_socket(node_id: String, socket: WebSocket) {
+async fn handle_derp_socket(state: Arc<ServerState>, node_id: String, socket: WebSocket) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
     {
-        let mut clients = derp_clients().lock().await;
+        let mut clients = state.derp_clients.lock().await;
         clients.insert(node_id.clone(), tx.clone());
     }
 
@@ -265,7 +242,7 @@ async fn handle_derp_socket(node_id: String, socket: WebSocket) {
                 };
 
                 let peer_tx = {
-                    let clients = derp_clients().lock().await;
+                    let clients = state.derp_clients.lock().await;
                     clients.get(&dst_node_id).cloned()
                 };
                 if let Some(peer_tx) = peer_tx {
@@ -276,13 +253,210 @@ async fn handle_derp_socket(node_id: String, socket: WebSocket) {
                 let _ = tx.send(Message::Pong(payload));
             }
             Message::Close(_) => break,
-            _ => {}
+            Message::Pong(_) | Message::Binary(_) => {}
         }
     }
 
     {
-        let mut clients = derp_clients().lock().await;
+        let mut clients = state.derp_clients.lock().await;
         clients.remove(&node_id);
     }
     send_task.abort();
+}
+
+fn enqueue_mailbox_entry(
+    conn: &mut Connection,
+    target_node_id: &str,
+    entry: &MailboxEntry,
+) -> Result<bool, rusqlite::Error> {
+    let tx = conn.transaction()?;
+    let queue_len: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM server_mailbox WHERE target_node_id = ?1",
+        params![target_node_id],
+        |row| row.get(0),
+    )?;
+    if queue_len >= MAX_MAILBOX_PER_NODE as i64 {
+        return Ok(false);
+    }
+
+    tx.execute(
+        "INSERT INTO server_mailbox (message_id, target_node_id, from_node_id, blob, project_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            Uuid::new_v4().to_string(),
+            target_node_id,
+            entry.from,
+            entry.blob,
+            entry.project_id,
+            entry.timestamp,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+fn enqueue_broadcast_entries(
+    conn: &mut Connection,
+    from_node_id: &str,
+    req: &BroadcastReq,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let tx = conn.transaction()?;
+    let mut sent_to = Vec::new();
+
+    for (node_id, blob) in &req.blobs {
+        if node_id == from_node_id {
+            continue;
+        }
+
+        let queue_len: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM server_mailbox WHERE target_node_id = ?1",
+            params![node_id],
+            |row| row.get(0),
+        )?;
+        if queue_len >= MAX_MAILBOX_PER_NODE as i64 {
+            continue;
+        }
+
+        tx.execute(
+            "INSERT INTO server_mailbox (message_id, target_node_id, from_node_id, blob, project_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                node_id,
+                from_node_id,
+                blob,
+                req.project_id,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+        sent_to.push(node_id.clone());
+    }
+
+    tx.commit()?;
+    Ok(sent_to)
+}
+
+fn drain_mailbox_entries(
+    conn: &mut Connection,
+    target_node_id: &str,
+) -> Result<Vec<MailboxEntry>, rusqlite::Error> {
+    let tx = conn.transaction()?;
+    let drained = {
+        let mut stmt = tx.prepare(
+            "SELECT message_id, from_node_id, blob, project_id, created_at \
+             FROM server_mailbox WHERE target_node_id = ?1 \
+             ORDER BY created_at ASC, message_id ASC",
+        )?;
+        let rows = stmt.query_map(params![target_node_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                MailboxEntry {
+                    from: row.get(1)?,
+                    blob: row.get(2)?,
+                    project_id: row.get(3)?,
+                    timestamp: row.get(4)?,
+                },
+            ))
+        })?;
+
+        let mut drained = Vec::new();
+        for row in rows {
+            drained.push(row?);
+        }
+        drained
+    };
+
+    for (message_id, _) in &drained {
+        tx.execute(
+            "DELETE FROM server_mailbox WHERE message_id = ?1",
+            params![message_id],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(drained.into_iter().map(|(_, entry)| entry).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn test_db_path() -> PathBuf {
+        std::env::temp_dir().join(format!("bridges-relay-test-{}.db", Uuid::new_v4()))
+    }
+
+    fn test_state_for_path(db_path: &Path) -> Arc<ServerState> {
+        let conn = Connection::open(db_path).unwrap();
+        super::super::init_server_db(&conn).unwrap();
+        drop(conn);
+        Arc::new(ServerState::new(db_path.to_path_buf()))
+    }
+
+    #[tokio::test]
+    async fn mailbox_survives_state_restart_until_fetched() {
+        let db_path = test_db_path();
+        let state = test_state_for_path(&db_path);
+
+        let _ = relay_message(
+            State(state.clone()),
+            Extension(AuthNode("sender".to_string())),
+            Json(RelayReq {
+                target_node_id: "receiver".to_string(),
+                blob: "hello".to_string(),
+                project_id: Some("proj_1".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let restarted_state = Arc::new(ServerState::new(db_path.clone()));
+        let messages = fetch_mailbox(
+            State(restarted_state),
+            Extension(AuthNode("receiver".to_string())),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "sender");
+        assert_eq!(messages[0].blob, "hello");
+        assert_eq!(messages[0].project_id.as_deref(), Some("proj_1"));
+    }
+
+    #[tokio::test]
+    async fn mailbox_fetch_drains_only_once() {
+        let db_path = test_db_path();
+        let state = test_state_for_path(&db_path);
+
+        for blob in ["one", "two"] {
+            let _ = relay_message(
+                State(state.clone()),
+                Extension(AuthNode("sender".to_string())),
+                Json(RelayReq {
+                    target_node_id: "receiver".to_string(),
+                    blob: blob.to_string(),
+                    project_id: None,
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let first = fetch_mailbox(
+            State(state.clone()),
+            Extension(AuthNode("receiver".to_string())),
+        )
+        .await
+        .unwrap()
+        .0;
+        let second = fetch_mailbox(State(state), Extension(AuthNode("receiver".to_string())))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(first.len(), 2);
+        assert!(second.is_empty());
+        assert_eq!(first[0].blob, "one");
+        assert_eq!(first[1].blob, "two");
+    }
 }
