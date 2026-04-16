@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::coord_client::CoordClient;
+use crate::crypto;
 use crate::mdns;
 use crate::noise::{NoiseHandshake, NoiseSession};
 
@@ -40,6 +41,8 @@ pub struct PeerConn {
     pub session: SessionState,
     /// Previous session kept briefly during rekey to decrypt in-flight packets.
     pub previous_session: Option<NoiseSession>,
+    /// Expected X25519 public key for this node as resolved from coordination.
+    pub expected_x25519_pub: Option<[u8; 32]>,
 }
 
 impl PeerConn {
@@ -48,6 +51,7 @@ impl PeerConn {
             state: ConnState::Idle,
             session: SessionState::None,
             previous_session: None,
+            expected_x25519_pub: None,
         }
     }
 }
@@ -55,6 +59,7 @@ impl PeerConn {
 /// Manages connections to all known peers.
 pub struct ConnManager {
     pub peers: HashMap<String, PeerConn>,
+    peer_ids_by_wire_id: HashMap<[u8; 20], String>,
     pub coord: Option<CoordClient>,
 }
 
@@ -62,15 +67,37 @@ impl ConnManager {
     pub fn new(coord: Option<CoordClient>) -> Self {
         Self {
             peers: HashMap::new(),
+            peer_ids_by_wire_id: HashMap::new(),
             coord,
         }
     }
 
     /// Get or create a PeerConn entry.
     pub fn get_or_create(&mut self, peer_id: &str) -> &mut PeerConn {
+        let wire_id = crypto::node_id_wire_id(peer_id);
+        self.peer_ids_by_wire_id
+            .insert(wire_id, peer_id.to_string());
         self.peers
             .entry(peer_id.to_string())
             .or_insert_with(|| PeerConn::new(peer_id))
+    }
+
+    /// Cache the expected X25519 key for a peer as resolved from coordination.
+    pub fn remember_peer_identity(&mut self, peer_id: &str, expected_x25519_pub: [u8; 32]) {
+        let pc = self.get_or_create(peer_id);
+        pc.expected_x25519_pub = Some(expected_x25519_pub);
+    }
+
+    /// Resolve a 20-byte wire ID back to the canonical Bridges node ID.
+    pub fn resolve_peer_id(&self, wire_id: &[u8; 20]) -> Option<String> {
+        self.peer_ids_by_wire_id.get(wire_id).cloned()
+    }
+
+    /// Return the expected X25519 public key for a known peer.
+    pub fn expected_peer_key(&self, peer_id: &str) -> Option<[u8; 32]> {
+        self.peers
+            .get(peer_id)
+            .and_then(|pc| pc.expected_x25519_pub)
     }
 
     /// Try LAN -> direct -> DERP in order, returning the best path found.

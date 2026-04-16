@@ -259,7 +259,8 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let recv_handle = tokio::spawn(async move {
         loop {
             match recv_transport.recv().await {
-                Ok((peer_id, plaintext)) => {
+                Ok((source, plaintext)) => {
+                    let peer_id = source.node_id().to_string();
                     let msg: serde_json::Value = match serde_json::from_slice(&plaintext) {
                         Ok(v) => v,
                         Err(e) => {
