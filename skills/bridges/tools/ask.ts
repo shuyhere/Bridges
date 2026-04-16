@@ -3,11 +3,11 @@ import type { ToolDefinition } from './shared.js';
 
 export const askAgent: ToolDefinition = {
   name: 'ask_agent',
-  description: 'Ask a specific agent by node ID through the current Bridges CLI.',
+  description: 'Ask a specific agent through the current Bridges CLI by node ID or project-scoped selector.',
   parameters: {
     type: 'object',
     properties: {
-      nodeId: { type: 'string', description: 'Target node ID (kd_...)' },
+      nodeId: { type: 'string', description: 'Target node ID, display name, `owner`, or `role:<role>`' },
       query: { type: 'string', description: 'Question to send' },
       projectId: { type: 'string', description: 'Project ID (proj_...)' },
       newSession: {
@@ -33,7 +33,7 @@ export const askAgent: ToolDefinition = {
 
 export const askOwner: ToolDefinition = {
   name: 'ask_owner',
-  description: 'Legacy helper. Owner-level routing is not supported by the current CLI.',
+  description: 'Ask the unique project owner through the current Bridges CLI.',
   parameters: {
     type: 'object',
     properties: {
@@ -44,9 +44,14 @@ export const askOwner: ToolDefinition = {
     required: ['owner', 'query', 'projectId'],
   },
   async execute(params) {
-    return {
-      error: `Owner-based ask is not supported by the current CLI. Resolve the owner's node ID with \`bridges members --project ${params.projectId as string}\` and use ask_agent.`,
-    };
+    const output = await bridgesCli([
+      'ask',
+      'owner',
+      params.query as string,
+      '--project',
+      params.projectId as string,
+    ]);
+    return { success: true, output };
   },
 };
 

@@ -4,6 +4,13 @@ use crate::client_config::ClientConfig;
 use crate::config::DaemonConfig;
 use crate::identity;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddressableMember {
+    node_id: String,
+    display_name: Option<String>,
+    role: Option<String>,
+}
+
 fn load_identity_or_exit() -> (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey) {
     identity::load_or_create_keypair().unwrap_or_else(|err| {
         eprintln!("Failed to load identity: {}", err);
@@ -21,6 +28,125 @@ fn open_local_db_or_exit() -> rusqlite::Connection {
         std::process::exit(1);
     });
     conn
+}
+
+fn normalized_selector(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn resolve_member_selector(
+    members: &[AddressableMember],
+    selector: &str,
+) -> Result<String, String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err("peer selector is required".to_string());
+    }
+
+    if selector.starts_with("kd_") {
+        return Ok(selector.to_string());
+    }
+
+    let normalized = normalized_selector(selector);
+    let mut display_matches: Vec<&AddressableMember> = members
+        .iter()
+        .filter(|member| {
+            member
+                .display_name
+                .as_deref()
+                .map(normalized_selector)
+                .as_deref()
+                == Some(normalized.as_str())
+        })
+        .collect();
+    if display_matches.len() == 1 {
+        return Ok(display_matches.remove(0).node_id.clone());
+    }
+    if display_matches.len() > 1 {
+        let candidates = display_matches
+            .into_iter()
+            .map(|member| member.node_id.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "selector '{}' matched multiple members: {}",
+            selector, candidates
+        ));
+    }
+
+    let role_selector = if normalized == "owner" {
+        Some("owner".to_string())
+    } else {
+        normalized
+            .strip_prefix("role:")
+            .map(|role| role.to_string())
+    };
+    if let Some(role_selector) = role_selector {
+        let mut role_matches: Vec<&AddressableMember> = members
+            .iter()
+            .filter(|member| {
+                member.role.as_deref().map(normalized_selector).as_deref()
+                    == Some(role_selector.as_str())
+            })
+            .collect();
+        if role_matches.len() == 1 {
+            return Ok(role_matches.remove(0).node_id.clone());
+        }
+        if role_matches.len() > 1 {
+            let candidates = role_matches
+                .into_iter()
+                .map(|member| member.node_id.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "selector '{}' matched multiple {} members: {}",
+                selector, role_selector, candidates
+            ));
+        }
+    }
+
+    Err(format!(
+        "could not resolve '{}' to a node ID; use `bridges members --project <id>` to inspect candidates",
+        selector
+    ))
+}
+
+fn load_project_members(project_id: &str) -> Vec<AddressableMember> {
+    let cfg = ClientConfig::load_or_exit();
+    let client = authed_client(&cfg);
+    let url = format!("{}/v1/projects/{}/members", cfg.coordination, project_id);
+    let resp = send_or_exit(&client, &url, None, "GET");
+    if !resp.status().is_success() {
+        eprintln!("Members failed: HTTP {}", resp.status());
+        std::process::exit(1);
+    }
+    let members: Vec<serde_json::Value> = parse_json_or_exit(resp);
+    members
+        .into_iter()
+        .map(|member| AddressableMember {
+            node_id: member["nodeId"].as_str().unwrap_or_default().to_string(),
+            display_name: member["displayName"].as_str().map(|v| v.to_string()),
+            role: member["agentRole"].as_str().map(|v| v.to_string()),
+        })
+        .filter(|member| !member.node_id.is_empty())
+        .collect()
+}
+
+fn resolve_peer_selector_or_exit(selector: &str, project_id: Option<&str>) -> String {
+    if selector.trim().starts_with("kd_") {
+        return selector.trim().to_string();
+    }
+    let Some(project_id) = project_id.filter(|project_id| !project_id.trim().is_empty()) else {
+        eprintln!(
+            "Non-node peer selectors require --project so Bridges can resolve project members."
+        );
+        std::process::exit(1);
+    };
+    let members = load_project_members(project_id);
+    resolve_member_selector(&members, selector).unwrap_or_else(|err| {
+        eprintln!("Address resolution failed: {}", err);
+        std::process::exit(1);
+    })
 }
 
 /// Ensure the daemon is running. Auto-starts it if not.
@@ -513,11 +639,12 @@ pub fn cmd_ask(node_id: &str, question: &str, project_id: Option<&str>, new_sess
     ensure_daemon();
 
     let pid = project_id.unwrap_or("");
+    let resolved_node_id = resolve_peer_selector_or_exit(node_id, project_id);
 
     let client = reqwest::blocking::Client::new();
     let url = format!("{}/ask", daemon_url());
     let body = serde_json::json!({
-        "node_id": node_id,
+        "node_id": resolved_node_id,
         "question": question,
         "project_id": pid,
         "new_session": new_session,
@@ -547,7 +674,7 @@ pub fn cmd_ask(node_id: &str, question: &str, project_id: Option<&str>, new_sess
         }
     };
 
-    eprintln!("Waiting for response from {}...", node_id);
+    eprintln!("Waiting for response from {}...", resolved_node_id);
     match poll_response(request_id, 120) {
         Some((from, text)) => {
             println!("[Response from {}]\n{}", from, text);
@@ -740,5 +867,73 @@ fn require_project_id(project_id: &str) {
             project_id
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_member_selector_accepts_unique_display_name() {
+        let members = vec![
+            AddressableMember {
+                node_id: "kd_alice".to_string(),
+                display_name: Some("Alice".to_string()),
+                role: Some("owner".to_string()),
+            },
+            AddressableMember {
+                node_id: "kd_bob".to_string(),
+                display_name: Some("Bob".to_string()),
+                role: Some("member".to_string()),
+            },
+        ];
+
+        let resolved = resolve_member_selector(&members, "alice").unwrap();
+        assert_eq!(resolved, "kd_alice");
+    }
+
+    #[test]
+    fn resolve_member_selector_supports_owner_and_role_selectors() {
+        let members = vec![
+            AddressableMember {
+                node_id: "kd_owner".to_string(),
+                display_name: Some("Alice".to_string()),
+                role: Some("owner".to_string()),
+            },
+            AddressableMember {
+                node_id: "kd_ops".to_string(),
+                display_name: Some("Ops".to_string()),
+                role: Some("infra".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            resolve_member_selector(&members, "owner").unwrap(),
+            "kd_owner"
+        );
+        assert_eq!(
+            resolve_member_selector(&members, "role:infra").unwrap(),
+            "kd_ops"
+        );
+    }
+
+    #[test]
+    fn resolve_member_selector_reports_ambiguity() {
+        let members = vec![
+            AddressableMember {
+                node_id: "kd_alice_1".to_string(),
+                display_name: Some("Alice".to_string()),
+                role: Some("member".to_string()),
+            },
+            AddressableMember {
+                node_id: "kd_alice_2".to_string(),
+                display_name: Some("Alice".to_string()),
+                role: Some("member".to_string()),
+            },
+        ];
+
+        let err = resolve_member_selector(&members, "alice").unwrap_err();
+        assert!(err.contains("matched multiple members"));
     }
 }

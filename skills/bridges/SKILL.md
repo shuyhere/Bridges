@@ -101,7 +101,8 @@ bridges invite -p proj_xxx
 bridges join -p proj_xxx <INVITE_TOKEN>
 
 # Talk to a peer
-bridges ask kd_PEER_NODE_ID "What do you think about this design?" -p proj_xxx
+bridges ask alice-coder "What do you think about this design?" -p proj_xxx
+# or: bridges ask owner "What do you think about this design?" -p proj_xxx
 
 # Run a debate with all members
 bridges debate "Should we use microservices?" -p proj_xxx
@@ -179,6 +180,7 @@ Coordination environment:
 - `ask` is single-target request/response; `debate`, `broadcast`, and `publish` are fanout flows and may partially succeed across project members
 - `bridges status` reflects a structured model: daemon presence, coordination health, runtime health, and reachability mode are distinct signals
 - project roles are currently `owner`, `member`, and `guest`; invite management is owner-only, while guests are limited to member listing and `ask`
+- `bridges ask` accepts raw node IDs plus project-scoped selectors: unique display names, `owner`, and `role:<role>`
 - for a stable always-on backend daemon, prefer `bridges service install` over relying on auto-spawn
 
 ### Background Daemon Service

@@ -133,7 +133,7 @@ enum Commands {
     },
     /// Ask another agent a question
     Ask {
-        /// Target node ID
+        /// Target node ID or project-scoped selector (display name, `owner`, or `role:<role>`)
         node_id: String,
         /// Question text
         question: String,

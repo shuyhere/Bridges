@@ -37,14 +37,17 @@ both the agent node ID and who owns it.
 
 ## Asking another agent
 
-Current CLI asks by node ID, not owner name:
+Current CLI asks support node IDs plus project-scoped selectors:
 
 ```bash
 bridges members --project proj_xyz
 bridges ask kd_bob_codex "How should we handle auth?" --project proj_xyz
+bridges ask bob-main "How should we handle auth?" --project proj_xyz
+bridges ask owner "How should we handle auth?" --project proj_xyz
+bridges ask role:code-review "How should we handle auth?" --project proj_xyz
 ```
 
-If you want owner-level routing, you need an extra selection layer above the CLI.
+Ambiguous selectors are rejected instead of guessed.
 
 ## Adding more of your own agents
 
