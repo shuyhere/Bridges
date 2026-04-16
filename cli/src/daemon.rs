@@ -15,10 +15,12 @@ use crate::transport::Transport;
 
 fn resolve_runtime_project_dir(project_id: &str, fallback: &str) -> String {
     if !project_id.is_empty() {
-        let conn = crate::db::open_db();
-        crate::db::init_db(&conn);
-        if let Some(path) = crate::queries::get_project_path(&conn, project_id) {
-            return path;
+        if let Ok(conn) = crate::db::open_db() {
+            if crate::db::init_db(&conn).is_ok() {
+                if let Some(path) = crate::queries::get_project_path(&conn, project_id) {
+                    return path;
+                }
+            }
         }
     }
     fallback.to_string()
@@ -150,18 +152,21 @@ async fn encode_mailbox_blob(
 
 /// Run the Bridges daemon. Blocks until interrupted.
 pub async fn run(_foreground: bool) -> Result<(), String> {
-    let (signing_key, verifying_key) = identity::load_or_create_keypair();
+    let (signing_key, verifying_key) =
+        identity::load_or_create_keypair().map_err(|err| format!("load identity: {}", err))?;
     let node_id = identity::derive_node_id(&verifying_key);
     let keypair = identity::NodeKeypair {
         signing: signing_key.clone(),
     };
 
-    let cfg = DaemonConfig::load();
+    let cfg = DaemonConfig::load().map_err(|err| format!("load daemon config: {}", err))?;
     println!("Bridges daemon starting: {}", node_id);
 
     // Derive X25519 keys
     let x_priv = identity::x25519_private_key(&keypair);
-    let api_key = cfg.api_key();
+    let api_key = cfg
+        .api_key()
+        .map_err(|err| format!("load API key: {}", err))?;
     if api_key.is_empty() {
         return Err("Not registered. Run `bridges setup` or `bridges register` first.".to_string());
     }

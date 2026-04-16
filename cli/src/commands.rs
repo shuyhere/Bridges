@@ -4,6 +4,25 @@ use crate::client_config::ClientConfig;
 use crate::config::DaemonConfig;
 use crate::identity;
 
+fn load_identity_or_exit() -> (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey) {
+    identity::load_or_create_keypair().unwrap_or_else(|err| {
+        eprintln!("Failed to load identity: {}", err);
+        std::process::exit(1);
+    })
+}
+
+fn open_local_db_or_exit() -> rusqlite::Connection {
+    let conn = crate::db::open_db().unwrap_or_else(|err| {
+        eprintln!("Failed to open local database: {}", err);
+        std::process::exit(1);
+    });
+    crate::db::init_db(&conn).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize local database: {}", err);
+        std::process::exit(1);
+    });
+    conn
+}
+
 /// Ensure the daemon is running. Auto-starts it if not.
 pub fn ensure_daemon() {
     let port = std::env::var("BRIDGES_DAEMON_PORT").unwrap_or_else(|_| "7070".to_string());
@@ -12,7 +31,10 @@ pub fn ensure_daemon() {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| {
+            eprintln!("Failed to build daemon probe client: {}", err);
+            std::process::exit(1);
+        });
 
     if client.get(&url).send().is_ok() {
         return;
@@ -64,7 +86,7 @@ pub fn cmd_setup(coordination: &str, runtime: &str, endpoint: &str, name: Option
         .or_else(|| std::env::var("USER").ok())
         .or_else(|| std::env::var("USERNAME").ok());
 
-    let (_signing_key, verifying_key) = identity::load_or_create_keypair();
+    let (_signing_key, verifying_key) = load_identity_or_exit();
     let node_id = identity::derive_node_id(&verifying_key);
     println!("Node ID: {}", node_id);
     if let Some(ref dn) = display_name {
@@ -80,11 +102,10 @@ pub fn cmd_setup(coordination: &str, runtime: &str, endpoint: &str, name: Option
         runtime_endpoint: endpoint.to_string(),
         ..DaemonConfig::default()
     };
-    let base = directories::BaseDirs::new().expect("cannot find home dir");
-    let cfg_path = base.home_dir().join(".bridges").join("daemon.json");
-    std::fs::create_dir_all(cfg_path.parent().unwrap()).ok();
-    let json = serde_json::to_string_pretty(&cfg).unwrap();
-    std::fs::write(&cfg_path, &json).expect("write daemon.json");
+    let cfg_path = cfg.save().unwrap_or_else(|err| {
+        eprintln!("Failed to save daemon config: {}", err);
+        std::process::exit(1);
+    });
     println!("\nConfig written to {}", cfg_path.display());
 
     // Auto-install and start the daemon service
@@ -112,12 +133,14 @@ pub fn cmd_setup(coordination: &str, runtime: &str, endpoint: &str, name: Option
 
 /// Register with a coordination server and save config.
 pub fn cmd_register(coordination: &str, display_name: Option<&str>) {
-    let (_signing_key, verifying_key) = identity::load_or_create_keypair();
+    let (_signing_key, verifying_key) = load_identity_or_exit();
     let node_id = identity::derive_node_id(&verifying_key);
     let ed_pub = bs58::encode(verifying_key.as_bytes()).into_string();
     let x_pub = hex::encode(
-        crate::crypto::ed25519_to_x25519_public(verifying_key.as_bytes())
-            .expect("own Ed25519 key must be valid"),
+        crate::crypto::ed25519_to_x25519_public(verifying_key.as_bytes()).unwrap_or_else(|err| {
+            eprintln!("Failed to derive X25519 public key: {}", err);
+            std::process::exit(1);
+        }),
     );
 
     let name = display_name.unwrap_or(&node_id);
@@ -160,7 +183,10 @@ pub fn cmd_register(coordination: &str, display_name: Option<&str>) {
         display_name: Some(name.to_string()),
         owner: None,
     };
-    cfg.save();
+    cfg.save().unwrap_or_else(|err| {
+        eprintln!("Failed to save client config: {}", err);
+        std::process::exit(1);
+    });
     println!("Registered as {}", node_id);
     println!("Config saved to ~/.bridges/config.json");
 }
@@ -197,12 +223,14 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
     std::fs::create_dir_all(&project_dir).ok();
 
     // Initialize local workspace metadata and optional shared workspace files.
-    crate::workspace::init_workspace(&project_dir, name);
+    crate::workspace::init_workspace(&project_dir, name).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize workspace: {}", err);
+        std::process::exit(1);
+    });
     crate::sync_engine::init_shared(&project_dir);
 
     // Store in local DB with path
-    let conn = crate::db::open_db();
-    crate::db::init_db(&conn);
+    let conn = open_local_db_or_exit();
     crate::queries::insert_project(
         &conn,
         &crate::models::Project {
@@ -219,7 +247,7 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
 
     // Write initial MEMBERS.md (creator as owner)
     let now = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let (_, vk) = identity::load_or_create_keypair();
+    let (_, vk) = load_identity_or_exit();
     let my_node = identity::derive_node_id(&vk);
     crate::sync_engine::update_members(&project_dir, &[(my_node, "owner".to_string(), now)]);
 
@@ -276,8 +304,7 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
     };
 
     // Check if project directory already exists locally
-    let conn = crate::db::open_db();
-    crate::db::init_db(&conn);
+    let conn = open_local_db_or_exit();
     let project_dir = if let Some(existing) = crate::queries::get_project_path_by_slug(&conn, &slug)
     {
         std::path::PathBuf::from(existing)
@@ -288,7 +315,10 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
     };
 
     // Initialize local workspace metadata and optional shared workspace files.
-    crate::workspace::init_workspace(&project_dir, &slug);
+    crate::workspace::init_workspace(&project_dir, &slug).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize workspace: {}", err);
+        std::process::exit(1);
+    });
     crate::sync_engine::init_shared(&project_dir);
 
     // Store in local DB
@@ -359,7 +389,10 @@ fn poll_response(request_id: &str, timeout_secs: u64) -> Option<(String, String)
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .unwrap();
+        .unwrap_or_else(|err| {
+            eprintln!("Failed to build polling client: {}", err);
+            std::process::exit(1);
+        });
     let url = format!("{}/response/{}", daemon_url(), request_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -380,8 +413,7 @@ fn poll_response(request_id: &str, timeout_secs: u64) -> Option<(String, String)
 
 /// Resolve project directory from project ID in local DB.
 fn resolve_project_dir(project_id: &str) -> Option<std::path::PathBuf> {
-    let conn = crate::db::open_db();
-    crate::db::init_db(&conn);
+    let conn = open_local_db_or_exit();
     crate::queries::get_project_path(&conn, project_id).map(std::path::PathBuf::from)
 }
 
@@ -650,14 +682,18 @@ fn authed_client(cfg: &ClientConfig) -> reqwest::blocking::Client {
     use reqwest::header;
     let mut headers = header::HeaderMap::new();
     let val = format!("Bearer {}", cfg.api_key);
-    headers.insert(
-        header::AUTHORIZATION,
-        header::HeaderValue::from_str(&val).unwrap(),
-    );
+    let header_value = header::HeaderValue::from_str(&val).unwrap_or_else(|err| {
+        eprintln!("Failed to build authorization header: {}", err);
+        std::process::exit(1);
+    });
+    headers.insert(header::AUTHORIZATION, header_value);
     reqwest::blocking::Client::builder()
         .default_headers(headers)
         .build()
-        .unwrap()
+        .unwrap_or_else(|err| {
+            eprintln!("Failed to build authenticated client: {}", err);
+            std::process::exit(1);
+        })
 }
 
 /// Send a blocking HTTP request or exit on network error.

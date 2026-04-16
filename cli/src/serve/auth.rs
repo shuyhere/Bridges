@@ -266,7 +266,7 @@ mod tests {
 
     fn test_state() -> Arc<ServerState> {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        super::super::init_server_db(&conn);
+        super::super::init_server_db(&conn).unwrap();
         Arc::new(ServerState {
             db: Mutex::new(conn),
         })

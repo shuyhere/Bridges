@@ -12,49 +12,64 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::error::ServerInitError;
+
 /// Shared state for all server routes.
 pub struct ServerState {
     pub db: Mutex<Connection>,
 }
 
 /// Initialize the server database schema.
-pub fn init_server_db(conn: &Connection) {
+pub fn init_server_db(conn: &Connection) -> Result<(), ServerInitError> {
     conn.execute_batch(SERVER_SCHEMA)
-        .expect("failed to init server schema");
+        .map_err(ServerInitError::Schema)?;
 
-    add_column_if_missing(conn, "registered_nodes", "endpoint_hints", "TEXT");
+    add_column_if_missing(conn, "registered_nodes", "endpoint_hints", "TEXT")?;
 
-    migrate_registered_nodes_to_core(conn);
-    migrate_server_projects_to_core(conn);
-    remove_legacy_user_state(conn);
+    migrate_registered_nodes_to_core(conn)?;
+    migrate_server_projects_to_core(conn)?;
+    remove_legacy_user_state(conn)?;
+    Ok(())
 }
 
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, column_type: &str) {
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &'static str,
+    column: &'static str,
+    column_type: &'static str,
+) -> Result<(), ServerInitError> {
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}");
-    if let Err(err) = conn.execute(&sql, []) {
-        let msg = err.to_string();
+    if let Err(source) = conn.execute(&sql, []) {
+        let msg = source.to_string();
         if !msg.contains("duplicate column name") {
-            panic!("failed to migrate {table}.{column}: {msg}");
+            return Err(ServerInitError::AddColumn {
+                table,
+                column,
+                source,
+            });
         }
     }
+    Ok(())
 }
 
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, ServerInitError> {
     let sql = format!("PRAGMA table_info({table})");
-    let mut stmt = conn.prepare(&sql).expect("prepare pragma table_info");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(ServerInitError::PrepareTableInfo)?;
     let has_column = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .expect("query pragma table_info")
+        .map_err(ServerInitError::QueryTableInfo)?
         .filter_map(Result::ok)
         .any(|name| name == column);
-    has_column
+    Ok(has_column)
 }
 
-fn migrate_registered_nodes_to_core(conn: &Connection) {
-    let needs_migration = table_has_column(conn, "registered_nodes", "gitea_user")
-        || table_has_column(conn, "registered_nodes", "user_id");
+fn migrate_registered_nodes_to_core(conn: &Connection) -> Result<(), ServerInitError> {
+    let needs_migration = table_has_column(conn, "registered_nodes", "gitea_user")?
+        || table_has_column(conn, "registered_nodes", "user_id")?;
     if !needs_migration {
-        return;
+        return Ok(());
     }
 
     conn.execute_batch(
@@ -96,14 +111,14 @@ fn migrate_registered_nodes_to_core(conn: &Connection) {
         ALTER TABLE registered_nodes_new RENAME TO registered_nodes;
         "#,
     )
-    .expect("migrate registered_nodes to core schema");
+    .map_err(ServerInitError::RegisteredNodesMigration)
 }
 
-fn migrate_server_projects_to_core(conn: &Connection) {
-    let needs_migration = table_has_column(conn, "server_projects", "gitea_owner")
-        || table_has_column(conn, "server_projects", "gitea_repo");
+fn migrate_server_projects_to_core(conn: &Connection) -> Result<(), ServerInitError> {
+    let needs_migration = table_has_column(conn, "server_projects", "gitea_owner")?
+        || table_has_column(conn, "server_projects", "gitea_repo")?;
     if !needs_migration {
-        return;
+        return Ok(());
     }
 
     conn.execute_batch(
@@ -139,10 +154,10 @@ fn migrate_server_projects_to_core(conn: &Connection) {
         ALTER TABLE server_projects_new RENAME TO server_projects;
         "#,
     )
-    .expect("migrate server_projects to core schema");
+    .map_err(ServerInitError::ServerProjectsMigration)
 }
 
-fn remove_legacy_user_state(conn: &Connection) {
+fn remove_legacy_user_state(conn: &Connection) -> Result<(), ServerInitError> {
     conn.execute_batch(
         r#"
         DROP INDEX IF EXISTS idx_user_tokens_hash;
@@ -154,7 +169,7 @@ fn remove_legacy_user_state(conn: &Connection) {
         DROP TABLE IF EXISTS users;
         "#,
     )
-    .expect("remove legacy user-account schema");
+    .map_err(ServerInitError::RemoveLegacyUserState)
 }
 
 /// Build the full axum router for `bridges serve`.
@@ -182,7 +197,7 @@ async fn health() -> axum::Json<serde_json::Value> {
 /// Start the coordination server.
 pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| format!("open db: {}", e))?;
-    init_server_db(&conn);
+    init_server_db(&conn).map_err(|e| e.to_string())?;
 
     let state = Arc::new(ServerState {
         db: Mutex::new(conn),

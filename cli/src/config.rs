@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+use crate::error::DaemonConfigError;
+
 /// Daemon-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -41,31 +43,51 @@ fn default_derp_enabled() -> bool {
 }
 
 impl DaemonConfig {
-    /// Load daemon config from ~/.bridges/daemon.json, with defaults.
-    pub fn load() -> Self {
-        let base = directories::BaseDirs::new();
-        if let Some(base) = base {
-            let path = base.home_dir().join(".bridges").join("daemon.json");
-            if path.exists() {
-                if let Ok(data) = fs::read_to_string(&path) {
-                    if let Ok(cfg) = serde_json::from_str(&data) {
-                        return cfg;
-                    }
-                }
+    fn config_path() -> Result<std::path::PathBuf, DaemonConfigError> {
+        let base = directories::BaseDirs::new().ok_or(DaemonConfigError::HomeDirUnavailable)?;
+        Ok(base.home_dir().join(".bridges").join("daemon.json"))
+    }
+
+    /// Load daemon config from ~/.bridges/daemon.json, with defaults when missing.
+    pub fn load() -> Result<Self, DaemonConfigError> {
+        let path = Self::config_path()?;
+        let data = match fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
             }
+            Err(source) => return Err(DaemonConfigError::Read { path, source }),
+        };
+        serde_json::from_str(&data).map_err(|source| DaemonConfigError::Parse { path, source })
+    }
+
+    pub fn save(&self) -> Result<std::path::PathBuf, DaemonConfigError> {
+        let path = Self::config_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| DaemonConfigError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        Self::default()
+        let json = serde_json::to_string_pretty(self).map_err(DaemonConfigError::Serialize)?;
+        fs::write(&path, json).map_err(|source| DaemonConfigError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
     }
 
     /// Get the API key. Reads from ~/.bridges/config.json first (where setup/register
     /// saves it), falls back to BRIDGES_API_KEY env var.
-    pub fn api_key(&self) -> String {
-        if let Some(cfg) = crate::client_config::ClientConfig::load() {
+    pub fn api_key(&self) -> Result<String, DaemonConfigError> {
+        if let Some(cfg) =
+            crate::client_config::ClientConfig::load().map_err(DaemonConfigError::ClientConfig)?
+        {
             if !cfg.api_key.is_empty() {
-                return cfg.api_key;
+                return Ok(cfg.api_key);
             }
         }
-        std::env::var("BRIDGES_API_KEY").unwrap_or_default()
+        Ok(std::env::var("BRIDGES_API_KEY").unwrap_or_default())
     }
 }
 

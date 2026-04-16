@@ -8,6 +8,7 @@ mod crypto;
 mod daemon;
 mod db;
 mod derp_client;
+mod error;
 mod identity;
 mod listener;
 mod local_api;
@@ -219,6 +220,35 @@ enum SessionAction {
     },
 }
 
+fn open_local_db_or_exit() -> rusqlite::Connection {
+    let conn = db::open_db().unwrap_or_else(|err| {
+        eprintln!("Failed to open local database: {}", err);
+        std::process::exit(1);
+    });
+    db::init_db(&conn).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize local database: {}", err);
+        std::process::exit(1);
+    });
+    conn
+}
+
+fn load_identity_or_exit() -> (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey) {
+    identity::load_or_create_keypair().unwrap_or_else(|err| {
+        eprintln!("Failed to load identity: {}", err);
+        std::process::exit(1);
+    })
+}
+
+fn build_runtime_or_exit() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|err| {
+            eprintln!("Failed to build tokio runtime: {}", err);
+            std::process::exit(1);
+        })
+}
+
 /// Entry point — most commands run without tokio (blocking HTTP).
 /// Only daemon, serve, sync, and ping need the async runtime.
 fn main() {
@@ -227,18 +257,16 @@ fn main() {
     match cli.command {
         // ── Sync commands (no tokio, instant startup) ──
         Commands::Status => {
-            let conn = db::open_db();
-            db::init_db(&conn);
+            let conn = open_local_db_or_exit();
             drop(conn);
-            let (_signing_key, verifying_key) = identity::load_or_create_keypair();
+            let (_signing_key, verifying_key) = load_identity_or_exit();
             let node_id = identity::derive_node_id(&verifying_key);
             cmd_status(&node_id, &verifying_key);
         }
         Commands::Init { slug, path } => {
-            let conn = db::open_db();
-            db::init_db(&conn);
+            let conn = open_local_db_or_exit();
             drop(conn);
-            let (signing_key, verifying_key) = identity::load_or_create_keypair();
+            let (signing_key, verifying_key) = load_identity_or_exit();
             let node_id = identity::derive_node_id(&verifying_key);
             cmd_init(&node_id, &signing_key, slug, path);
         }
@@ -363,34 +391,25 @@ fn main() {
         },
         // ── Async commands (need tokio for long-running networking) ──
         Commands::Serve { port, db } => {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(async {
-                    if let Err(e) = serve::run(port, &db).await {
-                        eprintln!("Server error: {}", e);
-                    }
-                });
+            build_runtime_or_exit().block_on(async {
+                if let Err(e) = serve::run(port, &db).await {
+                    eprintln!("Server error: {}", e);
+                }
+            });
         }
         Commands::Daemon { foreground } => {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(async {
-                    if let Err(e) = daemon::run(foreground).await {
-                        eprintln!("Daemon error: {}", e);
-                    }
-                });
+            build_runtime_or_exit().block_on(async {
+                if let Err(e) = daemon::run(foreground).await {
+                    eprintln!("Daemon error: {}", e);
+                }
+            });
         }
         Commands::Sync {
             project,
             path,
             approve_unmanaged,
         } => {
-            let conn = db::open_db();
-            db::init_db(&conn);
+            let conn = open_local_db_or_exit();
 
             let project_dir = if let Some(pid) = &project {
                 queries::get_project_path(&conn, pid)
@@ -407,7 +426,7 @@ fn main() {
             };
             drop(conn);
 
-            let (_, verifying_key) = identity::load_or_create_keypair();
+            let (_, verifying_key) = load_identity_or_exit();
             let node_id = identity::derive_node_id(&verifying_key);
 
             sync_engine::init_shared(&project_dir);
@@ -434,16 +453,11 @@ fn main() {
             }
         }
         Commands::Ping { node_id } => {
-            let conn = db::open_db();
-            db::init_db(&conn);
+            let conn = open_local_db_or_exit();
             drop(conn);
-            let (signing_key, verifying_key) = identity::load_or_create_keypair();
+            let (signing_key, verifying_key) = load_identity_or_exit();
             let my_node_id = identity::derive_node_id(&verifying_key);
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime")
-                .block_on(cmd_ping(&my_node_id, &signing_key, &node_id));
+            build_runtime_or_exit().block_on(cmd_ping(&my_node_id, &signing_key, &node_id));
         }
     }
 }
@@ -454,7 +468,12 @@ fn cmd_init(
     slug: Option<String>,
     path: Option<PathBuf>,
 ) {
-    let project_path = path.unwrap_or_else(|| std::env::current_dir().unwrap());
+    let project_path = path.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|err| {
+            eprintln!("Failed to resolve current directory: {}", err);
+            std::process::exit(1);
+        })
+    });
     let slug = slug.unwrap_or_else(|| {
         project_path
             .file_name()
@@ -463,11 +482,16 @@ fn cmd_init(
             .to_string()
     });
 
-    workspace::init_workspace(&project_path, &slug);
+    workspace::init_workspace(&project_path, &slug).unwrap_or_else(|err| {
+        eprintln!("Failed to initialize workspace: {}", err);
+        std::process::exit(1);
+    });
 
-    if let Some(pj) = workspace::read_project_json(&project_path) {
-        let conn = db::open_db();
-        db::init_db(&conn);
+    if let Some(pj) = workspace::read_project_json(&project_path).unwrap_or_else(|err| {
+        eprintln!("Failed to read workspace metadata: {}", err);
+        std::process::exit(1);
+    }) {
+        let conn = open_local_db_or_exit();
         let verifying = signing_key.verifying_key();
         let pubkey_b58 = bs58::encode(verifying.as_bytes()).into_string();
 
@@ -507,8 +531,11 @@ fn cmd_init(
 
 fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
     let pubkey_b58 = bs58::encode(verifying_key.as_bytes()).into_string();
-    let x25519_pub = crypto::ed25519_to_x25519_public(verifying_key.as_bytes())
-        .expect("own Ed25519 key must be valid");
+    let x25519_pub =
+        crypto::ed25519_to_x25519_public(verifying_key.as_bytes()).unwrap_or_else(|err| {
+            eprintln!("Failed to derive X25519 public key: {}", err);
+            std::process::exit(1);
+        });
 
     println!("Bridges Node Status");
     println!("  node_id:      {}", node_id);
@@ -516,15 +543,21 @@ fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
     println!("  x25519_pub:   {}", hex::encode(x25519_pub));
 
     // Show client config if available.
-    if let Some(cfg) = client_config::ClientConfig::load() {
-        println!("  coordination: {}", cfg.coordination);
-        println!("  registered:   yes");
-    } else {
-        println!("  registered:   no");
+    match client_config::ClientConfig::load() {
+        Ok(Some(cfg)) => {
+            println!("  coordination: {}", cfg.coordination);
+            println!("  registered:   yes");
+        }
+        Ok(None) => {
+            println!("  registered:   no");
+        }
+        Err(err) => {
+            println!("  registered:   error");
+            println!("  config error: {}", err);
+        }
     }
 
-    let conn = db::open_db();
-    db::init_db(&conn);
+    let conn = open_local_db_or_exit();
 
     let projects = queries::list_projects(&conn);
     if projects.is_empty() {

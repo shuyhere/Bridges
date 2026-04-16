@@ -276,8 +276,8 @@ async fn encrypt_and_send(
 
 /// Store a pending request and return its ID.
 fn resolve_project_dir(project_id: &str) -> Option<String> {
-    let conn = crate::db::open_db();
-    crate::db::init_db(&conn);
+    let conn = crate::db::open_db().ok()?;
+    crate::db::init_db(&conn).ok()?;
     crate::queries::get_project_path(&conn, project_id)
 }
 

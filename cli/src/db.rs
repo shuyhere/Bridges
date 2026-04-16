@@ -1,25 +1,29 @@
 use rusqlite::Connection;
 use std::path::PathBuf;
 
+use crate::error::DbError;
+
 /// Default database path: ~/.bridges/bridges.db
-pub fn default_db_path() -> PathBuf {
-    let base = directories::BaseDirs::new().expect("cannot determine home directory");
-    base.home_dir().join(".bridges").join("bridges.db")
+pub fn default_db_path() -> Result<PathBuf, DbError> {
+    let base = directories::BaseDirs::new().ok_or(DbError::HomeDirUnavailable)?;
+    Ok(base.home_dir().join(".bridges").join("bridges.db"))
 }
 
 /// Open (or create) the database at the default path.
-pub fn open_db() -> Connection {
-    let path = default_db_path();
+pub fn open_db() -> Result<Connection, DbError> {
+    let path = default_db_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("failed to create .bridges dir");
+        std::fs::create_dir_all(parent).map_err(|source| DbError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
-    Connection::open(&path).expect("failed to open database")
+    Connection::open(&path).map_err(|source| DbError::Open { path, source })
 }
 
 /// Run all schema migrations.
-pub fn init_db(conn: &Connection) {
-    conn.execute_batch(SCHEMA)
-        .expect("failed to run migrations");
+pub fn init_db(conn: &Connection) -> Result<(), DbError> {
+    conn.execute_batch(SCHEMA).map_err(DbError::Migrate)
 }
 
 const SCHEMA: &str = r#"

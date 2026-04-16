@@ -6,6 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::crypto;
+use crate::error::IdentityError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredKeypair {
@@ -25,52 +26,75 @@ pub fn x25519_private_key(keypair: &NodeKeypair) -> [u8; 32] {
 }
 
 /// Directory where identity files live: ~/.bridges/identity/
-fn identity_dir() -> PathBuf {
-    let base = directories::BaseDirs::new().expect("cannot determine home directory");
-    base.home_dir().join(".bridges").join("identity")
+fn identity_dir() -> Result<PathBuf, IdentityError> {
+    let base = directories::BaseDirs::new().ok_or(IdentityError::HomeDirUnavailable)?;
+    Ok(base.home_dir().join(".bridges").join("identity"))
 }
 
-fn keypair_path() -> PathBuf {
-    identity_dir().join("keypair.json")
+fn keypair_path() -> Result<PathBuf, IdentityError> {
+    Ok(identity_dir()?.join("keypair.json"))
 }
 
 /// Generate a fresh Ed25519 keypair and persist it.
-pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
+pub fn generate_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
     let signing = SigningKey::generate(&mut OsRng);
     let verifying = signing.verifying_key();
-    save_keypair(&signing);
-    (signing, verifying)
+    save_keypair(&signing)?;
+    Ok((signing, verifying))
+}
+
+fn load_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
+    let path = keypair_path()?;
+    let data = fs::read_to_string(&path).map_err(|source| IdentityError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let stored: StoredKeypair =
+        serde_json::from_str(&data).map_err(|source| IdentityError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    let secret_bytes = bs58::decode(&stored.secret_key)
+        .into_vec()
+        .map_err(|source| IdentityError::DecodeSecretKey {
+            source: source.to_string(),
+        })?;
+    let secret: [u8; 32] = secret_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        IdentityError::InvalidSecretKeyLength {
+            actual: bytes.len(),
+        }
+    })?;
+    let signing = SigningKey::from_bytes(&secret);
+    let verifying = signing.verifying_key();
+    Ok((signing, verifying))
 }
 
 /// Load existing keypair or generate a new one.
-pub fn load_or_create_keypair() -> (SigningKey, VerifyingKey) {
-    let path = keypair_path();
-    if path.exists() {
-        let data = fs::read_to_string(&path).expect("failed to read keypair file");
-        let stored: StoredKeypair = serde_json::from_str(&data).expect("invalid keypair JSON");
-        let secret_bytes = bs58::decode(&stored.secret_key)
-            .into_vec()
-            .expect("invalid base58 secret key");
-        let secret: [u8; 32] = secret_bytes
-            .try_into()
-            .expect("secret key must be 32 bytes");
-        let signing = SigningKey::from_bytes(&secret);
-        let verifying = signing.verifying_key();
-        (signing, verifying)
-    } else {
-        generate_keypair()
+pub fn load_or_create_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
+    match load_keypair() {
+        Ok(keys) => Ok(keys),
+        Err(IdentityError::Read { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            generate_keypair()
+        }
+        Err(err) => Err(err),
     }
 }
 
-fn save_keypair(signing: &SigningKey) {
-    let dir = identity_dir();
-    fs::create_dir_all(&dir).expect("failed to create identity dir");
+fn save_keypair(signing: &SigningKey) -> Result<(), IdentityError> {
+    let dir = identity_dir()?;
+    fs::create_dir_all(&dir).map_err(|source| IdentityError::CreateDir {
+        path: dir.clone(),
+        source,
+    })?;
     let stored = StoredKeypair {
         public_key: bs58::encode(signing.verifying_key().as_bytes()).into_string(),
         secret_key: bs58::encode(signing.to_bytes()).into_string(),
     };
-    let json = serde_json::to_string_pretty(&stored).unwrap();
-    fs::write(keypair_path(), json).expect("failed to write keypair");
+    let json = serde_json::to_string_pretty(&stored).map_err(IdentityError::Serialize)?;
+    let path = keypair_path()?;
+    fs::write(&path, json).map_err(|source| IdentityError::Write { path, source })
 }
 
 /// Derive a node ID: `kd_` + base58(sha256(pubkey)[:20])
