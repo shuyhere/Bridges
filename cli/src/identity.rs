@@ -69,16 +69,23 @@ fn load_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
     Ok((signing, verifying))
 }
 
-/// Load existing keypair or generate a new one.
-pub fn load_or_create_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
+pub fn load_existing_keypair() -> Result<Option<(SigningKey, VerifyingKey)>, IdentityError> {
     match load_keypair() {
-        Ok(keys) => Ok(keys),
+        Ok(keys) => Ok(Some(keys)),
         Err(IdentityError::Read { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
-            generate_keypair()
+            Ok(None)
         }
         Err(err) => Err(err),
+    }
+}
+
+/// Load existing keypair or generate a new one.
+pub fn load_or_create_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
+    match load_existing_keypair()? {
+        Some(keys) => Ok(keys),
+        None => generate_keypair(),
     }
 }
 

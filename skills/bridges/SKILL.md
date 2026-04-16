@@ -188,6 +188,7 @@ Coordination environment:
 ```bash
 bridges service install
 bridges service status
+bridges doctor
 bridges service restart
 bridges service stop
 bridges service uninstall
@@ -200,6 +201,7 @@ Behavior:
 - `ask`, `debate`, `broadcast`, and `publish` will try to start the installed service if the daemon is not already running
 - if no service is installed, Bridges falls back to the old direct auto-spawn behavior
 - when diagnosing a local daemon problem, check the service first with `bridges service status`
+- `bridges doctor` is the current CLI diagnostics entry point for daemon, coordination, runtime, project, and peer checks
 - if the service is missing or not installed, install it yourself with `bridges service install` before asking the user to debug further
 
 ### Projects

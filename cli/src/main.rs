@@ -87,6 +87,15 @@ enum Commands {
     },
     /// Show node identity and project status
     Status,
+    /// Run local diagnostics for daemon, coordination, runtime, project, and peer state
+    Doctor {
+        /// Optional project ID for project-scoped diagnostics
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional peer selector (node ID, display name, `owner`, or `role:<role>`)
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Ping a peer to test encrypted connectivity
     Ping {
         /// Node ID to ping (kd_xxx)
@@ -271,6 +280,9 @@ fn main() {
             let (signing_key, verifying_key) = load_identity_or_exit();
             let node_id = identity::derive_node_id(&verifying_key);
             cmd_init(&node_id, &signing_key, slug, path);
+        }
+        Commands::Doctor { project, peer } => {
+            commands::cmd_doctor(project.as_deref(), peer.as_deref());
         }
         Commands::Register { coordination } => {
             commands::cmd_register(&coordination, None);

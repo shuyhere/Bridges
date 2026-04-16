@@ -133,6 +133,7 @@ bridges service status
 For debugging:
 
 ```bash
+bridges doctor
 bridges daemon
 ```
 

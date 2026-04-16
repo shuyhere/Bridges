@@ -50,17 +50,27 @@ export const projectStatus: ToolDefinition = {
 
 export const networkStatus: ToolDefinition = {
   name: 'network_status',
-  description: 'Legacy helper. Network status probing is not exposed by the current CLI.',
+  description: 'Run Bridges diagnostics through the current CLI.',
   parameters: {
     type: 'object',
     properties: {
-      projectId: { type: 'string', description: 'Project ID (proj_...)' },
+      projectId: { type: 'string', description: 'Optional project ID (proj_...)' },
+      peer: {
+        type: 'string',
+        description: 'Optional peer selector (node ID, display name, `owner`, or `role:<role>`)',
+      },
     },
   },
-  async execute() {
-    return {
-      error: 'Network status probing is not exposed by the current Bridges CLI.',
-    };
+  async execute(params) {
+    const args = ['doctor'];
+    if (params.projectId) {
+      args.push('--project', params.projectId as string);
+    }
+    if (params.peer) {
+      args.push('--peer', params.peer as string);
+    }
+    const output = await bridgesCli(args);
+    return { success: true, output };
   },
 };
 

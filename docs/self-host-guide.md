@@ -269,6 +269,7 @@ Check:
 
 ```bash
 bridges service status
+bridges doctor
 curl http://<LOCAL_BRIDGES_HOST>:7070/status
 ```
 
