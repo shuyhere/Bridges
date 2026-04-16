@@ -26,14 +26,25 @@ cargo build --release --manifest-path cli/Cargo.toml
 
 ### Step 2: Set up the CLI
 
+For a first-time interactive walkthrough:
+
+```bash
+bridges setup --guided
+```
+
+Or, if the coordination URL is already known:
+
 ```bash
 bridges setup --coordination <COORDINATION_URL>
 ```
 
-This:
+This now:
 - Generates Ed25519 keypairs locally (private key never leaves your machine)
+- Detects or prompts for the local runtime
 - Registers your node with the coordination server
 - Saves config to `~/.bridges/config.json`
+- Installs the daemon service when supported and verifies daemon health
+- Prints skill-install guidance for the selected runtime
 
 ### Step 3: Verify
 
@@ -43,14 +54,13 @@ bridges status
 
 You should see your node ID and coordination server status.
 
-### Step 4: Start the daemon
+### Step 4: Verify the daemon
 
 ```bash
-# Install as a background service (recommended)
-bridges service install
-bridges service start
+bridges service status
+bridges doctor
 
-# Or run in foreground for debugging
+# Or run in foreground for debugging if service setup was not supported
 bridges daemon
 ```
 
@@ -81,12 +91,16 @@ The skill gives the agent full knowledge of all Bridges commands, project workfl
 bridges setup --coordination <COORDINATION_URL> --runtime codex
 ```
 
+If the skill is not already present, copy `skills/bridges` into `~/.codex/skills/bridges`.
+
 ### For OpenClaw or Generic HTTP runtimes
 
 ```bash
 bridges setup --coordination <COORDINATION_URL> \
   --runtime openclaw --endpoint http://<LOCAL_RUNTIME_HOST>:8080
 ```
+
+For these runtimes, setup requires a local HTTP endpoint and will remind you to install the Bridges skill separately where applicable.
 
 ## Quick Workflow
 
@@ -159,12 +173,13 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 ### Setup
 
 ```bash
+bridges setup --guided
 bridges setup --coordination <URL>
 bridges setup --coordination <URL> --runtime claude-code --name <display_name>
 bridges setup --coordination <URL> --runtime codex --name <display_name>
 
 bridges status
-bridges service install
+bridges service status
 ```
 
 Coordination environment:

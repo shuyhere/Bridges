@@ -58,20 +58,23 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// One-command setup: generate keys, register, configure, start daemon
+    /// Set up a local Bridges node, with guided onboarding when key flags are omitted
     Setup {
-        /// Coordination server URL
-        #[arg(long, default_value = "http://127.0.0.1:17080")]
-        coordination: String,
-        /// Runtime type (claude-code, codex, openclaw, generic)
-        #[arg(long, default_value = "claude-code")]
-        runtime: String,
-        /// Runtime endpoint URL (for openclaw/generic)
-        #[arg(long, default_value = "")]
-        endpoint: String,
+        /// Coordination server URL. If omitted, setup will prompt interactively.
+        #[arg(long)]
+        coordination: Option<String>,
+        /// Runtime type (claude-code, codex, openclaw, generic). If omitted, Bridges will detect or prompt.
+        #[arg(long)]
+        runtime: Option<String>,
+        /// Runtime endpoint URL (required for openclaw/generic)
+        #[arg(long)]
+        endpoint: Option<String>,
         /// Your display name
         #[arg(long)]
         name: Option<String>,
+        /// Force the guided onboarding flow even when flags are provided
+        #[arg(long, default_value_t = false)]
+        guided: bool,
     },
     /// Optionally sync shared workspace files for a project
     Sync {
@@ -292,8 +295,15 @@ fn main() {
             runtime,
             endpoint,
             name,
+            guided,
         } => {
-            commands::cmd_setup(&coordination, &runtime, &endpoint, name.as_deref());
+            commands::cmd_setup(
+                coordination.as_deref(),
+                runtime.as_deref(),
+                endpoint.as_deref(),
+                name.as_deref(),
+                guided,
+            );
         }
         Commands::Create { name, description } => {
             commands::cmd_create(&name, description.as_deref());

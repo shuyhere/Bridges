@@ -72,10 +72,20 @@ Only use this once a public beta package is actually published. Until then, use 
 
 ## Part 3: Set up each user
 
+For a first-time walkthrough on each machine:
+
+```bash
+bridges setup --guided
+```
+
+Or, if you already know the coordination URL:
+
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Person A"
 bridges setup --coordination http://<COORDINATION_HOST>:17080 --name "Person B"
 ```
+
+The setup flow now detects or prompts for the runtime, registers the node, installs the daemon service when supported, verifies daemon health, and prints skill guidance.
 
 Verify on both machines:
 
@@ -87,17 +97,16 @@ Write down both node IDs.
 
 ---
 
-## Part 4: Start the daemon on both machines
+## Part 4: Verify the daemon on both machines
 
 Recommended:
 
 ```bash
-bridges service install
-bridges service start
 bridges service status
+bridges doctor
 ```
 
-Foreground debug mode:
+Foreground debug mode if service setup was not supported or failed:
 
 ```bash
 bridges daemon

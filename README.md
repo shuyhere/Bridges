@@ -118,22 +118,30 @@ If the coordination server is running on the same machine, replace `<COORDINATIO
 
 ### 3. Set up a local node
 
+For a first-time interactive walkthrough:
+
+```bash
+bridges setup --guided
+```
+
+Or, if you already know the coordination URL:
+
 ```bash
 bridges setup --coordination http://<COORDINATION_HOST>:17080
 ```
 
-### 4. Start the daemon
+`bridges setup` now guides runtime selection when needed, registers the node, writes config, installs the daemon service when supported, verifies local daemon health, and prints skill-install guidance.
+
+### 4. Verify the daemon
 
 ```bash
-bridges service install
-bridges service start
 bridges service status
+bridges doctor
 ```
 
-For debugging:
+If service installation was not supported or failed, you can still run the daemon manually:
 
 ```bash
-bridges doctor
 bridges daemon
 ```
 
