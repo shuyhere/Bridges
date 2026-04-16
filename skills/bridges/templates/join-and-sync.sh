@@ -3,12 +3,12 @@
 #
 # Usage:
 #   chmod +x join-and-sync.sh
-#   ./join-and-sync.sh <project-id> <invite-token> [project-dir]
+#   ./join-and-sync.sh <invite-or-token> [project-id] [project-dir]
 
 set -euo pipefail
 
-PROJECT_ID="${1:?Usage: join-and-sync.sh <project-id> <invite-token> [project-dir]}"
-TOKEN="${2:?Usage: join-and-sync.sh <project-id> <invite-token> [project-dir]}"
+INVITE="${1:?Usage: join-and-sync.sh <invite-or-token> [project-id] [project-dir]}"
+PROJECT_ID="${2:-}"
 PROJECT_DIR="${3:-.}"
 
 echo "=== Bridges: Join Project ==="
@@ -17,7 +17,11 @@ echo ""
 # Step 1: Join project
 echo "Joining project..."
 cd "$PROJECT_DIR"
-bridges join --project "$PROJECT_ID" "$TOKEN"
+if [[ -n "$PROJECT_ID" ]]; then
+  bridges join --project "$PROJECT_ID" "$INVITE"
+else
+  bridges join "$INVITE"
+fi
 
 # Step 2: Optional sync
 echo ""

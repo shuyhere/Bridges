@@ -108,11 +108,11 @@ For these runtimes, setup requires a local HTTP endpoint and will remind you to 
 # Create a project
 bridges create my-project --description "My agent collaboration"
 
-# Invite a collaborator (share the token + project ID with them)
+# Invite a collaborator (share the printed `bridges://join/...` string with them)
 bridges invite -p proj_xxx
 
 # They join with:
-bridges join -p proj_xxx <INVITE_TOKEN>
+bridges join <SHAREABLE_INVITE>
 
 # Talk to a peer
 bridges ask alice-coder "What do you think about this design?" -p proj_xxx
@@ -164,9 +164,10 @@ Never tell the user to run `bridges` commands themselves. Run the commands and s
 
 1. `--project` always takes a project ID starting with `proj_`, never the project slug.
 2. After `bridges create`, save the returned `proj_...` ID and reuse it.
-3. `ask`, `debate`, `invite`, `join`, `members`, `sync`, `publish`, and `session` all need a project ID.
+3. `ask`, `debate`, `invite`, `members`, `sync`, `publish`, and `session` need a project ID.
+   `join` can use either a shareable `bridges://join/...` invite string or the legacy `--project + token` flow.
    `sync` is optional; the core messaging flow does not depend on it.
-4. If you do not know the project ID, get it from `bridges status` or the prior command output.
+4. If you do not know the project ID, get it from `bridges status`, the prior command output, or the shareable invite payload.
 
 ## Command Reference
 
@@ -224,6 +225,7 @@ Behavior:
 ```bash
 bridges create <name> --description "..."
 bridges invite --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+bridges join <SHAREABLE_INVITE>
 bridges join --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx <INVITE_TOKEN>
 bridges members --project proj_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
@@ -306,7 +308,7 @@ Do not treat `.bridges/` as synced shared state. It is local-only metadata and m
 
 1. Use the saved `proj_...` ID
 2. Run `bridges invite --project proj_xxx`
-3. Give the user the invite token and project ID
+3. Give the user the printed shareable invite string (`bridges://join/...`), and optionally the project ID for reference
 4. If you mention the join command, it must be `bridges join --project proj_xxx <TOKEN>`
 
 ### Join a project

@@ -28,7 +28,7 @@ export const projectInit: ToolDefinition = {
 
 export const projectInvite: ToolDefinition = {
   name: 'project_invite',
-  description: 'Generate an invite token for another agent to join this project.',
+  description: 'Generate a shareable invite string for another agent to join this project.',
   parameters: {
     type: 'object',
     properties: {
@@ -39,23 +39,39 @@ export const projectInvite: ToolDefinition = {
   async execute(params) {
     const args = ['invite', '--project', params.projectId as string];
     const output = await bridgesCli(args);
-    return { success: true, inviteToken: output };
+    const shareableInvite = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('bridges://join/'));
+    return {
+      success: true,
+      invite: shareableInvite ?? output,
+      output,
+    };
   },
 };
 
 export const projectJoin: ToolDefinition = {
   name: 'project_join',
-  description: 'Join a project using an invite token.',
+  description: 'Join a project using either a shareable invite string or a raw token + project ID.',
   parameters: {
     type: 'object',
     properties: {
-      projectId: { type: 'string', description: 'Project ID to join (proj_...)' },
-      token: { type: 'string', description: 'Invite token received from another agent' },
+      invite: {
+        type: 'string',
+        description: 'Shareable invite string (`bridges://join/...`) or raw invite token',
+      },
+      projectId: {
+        type: 'string',
+        description: 'Project ID to join (required only when using a raw invite token)',
+      },
     },
-    required: ['projectId', 'token'],
+    required: ['invite'],
   },
   async execute(params) {
-    const args = ['join', '--project', params.projectId as string, params.token as string];
+    const args = ['join'];
+    if (params.projectId) args.push('--project', params.projectId as string);
+    args.push(params.invite as string);
     const output = await bridgesCli(args);
     return { success: true, output };
   },

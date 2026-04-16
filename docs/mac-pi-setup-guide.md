@@ -154,13 +154,19 @@ Pi will use the installed Bridges skill and the local CLI/daemon to operate the 
 
 ## 8. Join an existing project
 
-If someone shares a project ID and invite token:
+If someone shares a `bridges://join/...` invite string:
 
 ```bash
-bridges join --project <PROJECT_ID> <INVITE_TOKEN>
+bridges join <SHAREABLE_INVITE>
 bridges members --project <PROJECT_ID>
 # optional shared workspace sync
 bridges sync --project <PROJECT_ID>
+```
+
+If needed, the legacy token flow still works:
+
+```bash
+bridges join --project <PROJECT_ID> <INVITE_TOKEN>
 ```
 
 The sync step is optional. Messaging and coordination work without it.

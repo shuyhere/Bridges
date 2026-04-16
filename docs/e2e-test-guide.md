@@ -54,10 +54,16 @@ bridges invite --project <PROJECT_ID>
 
 Send Machine B:
 
-- `<PROJECT_ID>`
-- `<INVITE_TOKEN>`
+- the printed `<SHAREABLE_INVITE>` string (`bridges://join/...`)
+- optionally `<PROJECT_ID>` for reference
 
 On Machine B:
+
+```bash
+bridges join <SHAREABLE_INVITE>
+```
+
+Legacy token flow still works if needed:
 
 ```bash
 bridges join --project <PROJECT_ID> <INVITE_TOKEN>

@@ -186,10 +186,16 @@ bridges invite --project <PROJECT_ID>
 
 Share with collaborators:
 
-- the project ID
-- the invite token
+- the printed `bridges://join/...` invite string
+- optionally the project ID as a human reference
 
 Then on the collaborator machine:
+
+```bash
+bridges join <SHAREABLE_INVITE>
+```
+
+Legacy token flow still works if needed:
 
 ```bash
 bridges join --project <PROJECT_ID> <INVITE_TOKEN>

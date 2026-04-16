@@ -519,6 +519,93 @@ fn resolve_peer_selector_or_exit(selector: &str, project_id: Option<&str>) -> St
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ShareableInvite {
+    #[serde(rename = "v")]
+    version: u8,
+    coordination: String,
+    #[serde(rename = "projectId")]
+    project_id: String,
+    #[serde(rename = "inviteToken")]
+    invite_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedInvite {
+    coordination: Option<String>,
+    project_id: String,
+    invite_token: String,
+}
+
+fn encode_shareable_invite(
+    coordination: &str,
+    project_id: &str,
+    invite_token: &str,
+) -> Result<String, String> {
+    let payload = ShareableInvite {
+        version: 1,
+        coordination: coordination.trim_end_matches('/').to_string(),
+        project_id: project_id.to_string(),
+        invite_token: invite_token.to_string(),
+    };
+    let json = serde_json::to_vec(&payload)
+        .map_err(|err| format!("failed to encode shareable invite payload: {}", err))?;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    Ok(format!("bridges://join/{}", encoded))
+}
+
+fn decode_shareable_invite(value: &str) -> Result<Option<ShareableInvite>, String> {
+    let trimmed = value.trim();
+    let Some(encoded) = trimmed.strip_prefix("bridges://join/") else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|err| format!("invalid shareable invite encoding: {}", err))?;
+    let invite: ShareableInvite = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("invalid shareable invite payload: {}", err))?;
+    if invite.version != 1 {
+        return Err(format!(
+            "unsupported shareable invite version {}",
+            invite.version
+        ));
+    }
+    if invite.project_id.trim().is_empty() || invite.invite_token.trim().is_empty() {
+        return Err("shareable invite is missing project or token data".to_string());
+    }
+    Ok(Some(invite))
+}
+
+fn resolve_join_invite(invite: &str, project_id: Option<&str>) -> Result<ResolvedInvite, String> {
+    if let Some(bundle) = decode_shareable_invite(invite)? {
+        if let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) {
+            if project_id != bundle.project_id {
+                return Err(format!(
+                    "shareable invite targets project {}, but --project was {}",
+                    bundle.project_id, project_id
+                ));
+            }
+        }
+        return Ok(ResolvedInvite {
+            coordination: Some(bundle.coordination),
+            project_id: bundle.project_id,
+            invite_token: bundle.invite_token,
+        });
+    }
+
+    let Some(project_id) = project_id.filter(|value| !value.trim().is_empty()) else {
+        return Err(
+            "raw invite tokens still require --project, or use the full `bridges://join/...` invite string"
+                .to_string(),
+        );
+    };
+    Ok(ResolvedInvite {
+        coordination: None,
+        project_id: project_id.to_string(),
+        invite_token: invite.trim().to_string(),
+    })
+}
+
 /// Ensure the daemon is running. Auto-starts it if not.
 pub fn ensure_daemon() {
     let port = std::env::var("BRIDGES_DAEMON_PORT").unwrap_or_else(|_| "7070".to_string());
@@ -912,7 +999,7 @@ pub fn cmd_create(name: &str, description: Option<&str>) {
     println!("  path: {}", project_dir.display());
 }
 
-/// Generate an invite token for a project.
+/// Generate a shareable invite for a project.
 pub fn cmd_invite(project_id: &str) {
     require_project_id(project_id);
     let cfg = ClientConfig::load_or_exit();
@@ -928,20 +1015,73 @@ pub fn cmd_invite(project_id: &str) {
         std::process::exit(1);
     }
     let val: serde_json::Value = parse_json_or_exit(resp);
-    println!(
-        "Invite token: {}",
-        val["inviteToken"].as_str().unwrap_or("?")
-    );
+    let invite_token = val["inviteToken"].as_str().unwrap_or("?");
+    let shareable = encode_shareable_invite(&cfg.coordination, project_id, invite_token)
+        .unwrap_or_else(|err| {
+            eprintln!("Failed to build shareable invite: {}", err);
+            std::process::exit(1);
+        });
+
+    println!("Invite created for {}", project_id);
+    println!("\nShare this with your collaborator:");
+    println!("  {}", shareable);
+    println!("\nJoin command:");
+    println!("  bridges join '{}'", shareable);
+    println!("\nUnderlying token flow (still supported):");
+    println!("  project: {}", project_id);
+    println!("  token:   {}", invite_token);
 }
 
-/// Join a project with an invite token + create local directory.
-pub fn cmd_join(invite_token: &str, project_id: &str) {
-    require_project_id(project_id);
-    let cfg = ClientConfig::load_or_exit();
+/// Join a project with a shareable invite string or raw token + project.
+pub fn cmd_join(invite: &str, project_id: Option<&str>) {
+    let invite = resolve_join_invite(invite, project_id).unwrap_or_else(|err| {
+        eprintln!("Join failed: {}", err);
+        std::process::exit(1);
+    });
+    require_project_id(&invite.project_id);
+
+    let cfg = match ClientConfig::load() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
+            if let Some(coordination) = invite.coordination.as_deref() {
+                eprintln!(
+                    "Not registered. Run `bridges setup --coordination {}` before joining this invite.",
+                    coordination
+                );
+            } else {
+                eprintln!(
+                    "Not registered. Run `bridges setup --coordination <url>` before joining this invite."
+                );
+            }
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("Failed to load client config: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(coordination) = invite.coordination.as_deref() {
+        if cfg.coordination.trim_end_matches('/') != coordination.trim_end_matches('/') {
+            eprintln!(
+                "Join failed: invite targets coordination {}, but this node is registered against {}.",
+                coordination, cfg.coordination
+            );
+            eprintln!(
+                "Run `bridges setup --coordination {}` on the correct server, then retry the invite.",
+                coordination
+            );
+            std::process::exit(1);
+        }
+    }
+
     let client = authed_client(&cfg);
-    let url = format!("{}/v1/projects/{}/join", cfg.coordination, project_id);
+    let url = format!(
+        "{}/v1/projects/{}/join",
+        cfg.coordination, invite.project_id
+    );
     let body = serde_json::json!({
-        "inviteToken": invite_token,
+        "inviteToken": invite.invite_token,
         "agentRole": "member",
     });
     let resp = send_or_exit(&client, &url, Some(&body), "POST");
@@ -951,13 +1091,16 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
     }
 
     // Fetch project details to get the slug.
-    let details_url = format!("{}/v1/projects/{}", cfg.coordination, project_id);
+    let details_url = format!("{}/v1/projects/{}", cfg.coordination, invite.project_id);
     let slug = match client.get(&details_url).send() {
         Ok(resp) if resp.status().is_success() => {
             let val: serde_json::Value = resp.json().unwrap_or_default();
-            val["slug"].as_str().unwrap_or(project_id).to_string()
+            val["slug"]
+                .as_str()
+                .unwrap_or(&invite.project_id)
+                .to_string()
         }
-        _ => project_id.replace("proj_", ""),
+        _ => invite.project_id.replace("proj_", ""),
     };
 
     // Check if project directory already exists locally
@@ -982,7 +1125,7 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
     crate::queries::insert_project(
         &conn,
         &crate::models::Project {
-            project_id: project_id.to_string(),
+            project_id: invite.project_id.to_string(),
             slug: slug.clone(),
             display_name: Some(slug.clone()),
             description: None,
@@ -994,7 +1137,10 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
     );
 
     // Fetch and write MEMBERS.md
-    let members_url = format!("{}/v1/projects/{}/members", cfg.coordination, project_id);
+    let members_url = format!(
+        "{}/v1/projects/{}/members",
+        cfg.coordination, invite.project_id
+    );
     if let Ok(resp) = client.get(&members_url).send() {
         if let Ok(members) = resp.json::<Vec<serde_json::Value>>() {
             let member_list: Vec<(String, String, String)> = members
@@ -1010,7 +1156,7 @@ pub fn cmd_join(invite_token: &str, project_id: &str) {
         }
     }
 
-    println!("Joined project {}", project_id);
+    println!("Joined project {}", invite.project_id);
     println!("  path: {}", project_dir.display());
 }
 
@@ -1987,6 +2133,47 @@ fn require_project_id(project_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shareable_invite_round_trips() {
+        let encoded =
+            encode_shareable_invite("http://127.0.0.1:17080/", "proj_test", "bridges_inv_test")
+                .unwrap();
+        let decoded = decode_shareable_invite(&encoded).unwrap().unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.coordination, "http://127.0.0.1:17080");
+        assert_eq!(decoded.project_id, "proj_test");
+        assert_eq!(decoded.invite_token, "bridges_inv_test");
+    }
+
+    #[test]
+    fn resolve_join_invite_accepts_shareable_string_without_project_flag() {
+        let encoded =
+            encode_shareable_invite("http://127.0.0.1:17080", "proj_test", "bridges_inv_test")
+                .unwrap();
+        let invite = resolve_join_invite(&encoded, None).unwrap();
+        assert_eq!(invite.project_id, "proj_test");
+        assert_eq!(invite.invite_token, "bridges_inv_test");
+        assert_eq!(
+            invite.coordination.as_deref(),
+            Some("http://127.0.0.1:17080")
+        );
+    }
+
+    #[test]
+    fn resolve_join_invite_rejects_mismatched_project_flag() {
+        let encoded =
+            encode_shareable_invite("http://127.0.0.1:17080", "proj_test", "bridges_inv_test")
+                .unwrap();
+        let err = resolve_join_invite(&encoded, Some("proj_other")).unwrap_err();
+        assert!(err.contains("targets project proj_test"));
+    }
+
+    #[test]
+    fn resolve_join_invite_requires_project_for_raw_token() {
+        let err = resolve_join_invite("bridges_inv_test", None).unwrap_err();
+        assert!(err.contains("raw invite tokens still require --project"));
+    }
 
     #[test]
     fn preferred_runtime_uses_existing_supported_runtime() {

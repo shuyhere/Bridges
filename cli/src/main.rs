@@ -126,17 +126,18 @@ enum Commands {
         #[arg(short, long)]
         description: Option<String>,
     },
-    /// Generate an invite token for a project
+    /// Generate a shareable invite for a project
     Invite {
         #[arg(short, long)]
         project: String,
     },
-    /// Join a project using an invite token
+    /// Join a project using a shareable invite string or a raw invite token
     Join {
-        /// Invite token
-        invite_token: String,
+        /// Shareable invite string (`bridges://join/...`) or raw invite token
+        invite: String,
+        /// Project ID (required only when using a raw invite token)
         #[arg(short, long)]
-        project: String,
+        project: Option<String>,
     },
     /// List members of a project
     Members {
@@ -311,11 +312,8 @@ fn main() {
         Commands::Invite { project } => {
             commands::cmd_invite(&project);
         }
-        Commands::Join {
-            invite_token,
-            project,
-        } => {
-            commands::cmd_join(&invite_token, &project);
+        Commands::Join { invite, project } => {
+            commands::cmd_join(&invite, project.as_deref());
         }
         Commands::Members { project } => {
             commands::cmd_members(&project);

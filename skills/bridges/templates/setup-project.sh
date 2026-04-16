@@ -29,10 +29,10 @@ read -r -p "Project created. Enter the proj_... ID from the output: " PROJECT_ID
 
 # Step 3: Generate invite
 echo ""
-echo "Generating invite token..."
+echo "Generating shareable invite..."
 bridges invite --project "$PROJECT_ID"
 
 echo ""
 echo "=== Done ==="
-echo "Share the invite token and project ID above with collaborators."
-echo "They join by running: bridges join --project <proj_id> <token>"
+echo "Share the printed bridges://join/... invite string with collaborators."
+echo "They join by running: bridges join <shareable_invite>"

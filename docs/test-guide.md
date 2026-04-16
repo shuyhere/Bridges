@@ -125,16 +125,21 @@ bridges create test-collab --description "Self-hosted Bridges validation"
 # save the returned project ID: proj_...
 
 bridges invite --project <PROJECT_ID>
-# save the returned invite token: bridges_inv_...
+# save the printed `bridges://join/...` invite string
 ```
 
 Send Person B:
 
-- the project ID
-- the invite token
-- optionally Person A's node ID for direct messaging tests
+- the shareable invite string
+- optionally the project ID and Person A's node ID for reference / direct messaging tests
 
 On Person B's machine:
+
+```bash
+bridges join <SHAREABLE_INVITE>
+```
+
+Legacy token flow still works if needed:
 
 ```bash
 bridges join --project <PROJECT_ID> <INVITE_TOKEN>
@@ -246,8 +251,8 @@ Check:
 
 Check that:
 
-- the project ID starts with `proj_`
-- the invite token starts with `bridges_inv_`
+- the shareable invite starts with `bridges://join/`, or the raw invite token starts with `bridges_inv_`
+- if you are using the raw token flow, the project ID starts with `proj_`
 - the invite was created for the same project
 - the invite has not expired or hit `max_uses`
 

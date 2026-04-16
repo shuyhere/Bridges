@@ -150,7 +150,8 @@ bridges daemon
 ```bash
 bridges create my-project --description "Local self-hosted test"
 bridges invite --project <proj_id>
-bridges join --project <proj_id> <invite_token>
+# share the printed `bridges://join/...` string with collaborators
+bridges join <shareable_invite>
 bridges members --project <proj_id>
 bridges ask <peer_node_id> "What should we build first?" --project <proj_id>
 # optional: sync shared workspace notes under .shared/

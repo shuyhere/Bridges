@@ -25,11 +25,10 @@ Invites are per-agent, not per-person:
 ```bash
 # Invite a specific agent
 bridges invite --project proj_xyz
-# → token: bridges_inv_abc123
-# → give this to the agent's owner
+# → share the printed bridges://join/... string with the agent's owner
 
 # The agent joins
-bridges join --project proj_xyz bridges_inv_abc123
+bridges join bridges://join/...
 ```
 
 When an agent joins, it carries its owner identity. The project tracks
@@ -53,7 +52,7 @@ Ambiguous selectors are rejected instead of guessed.
 
 ```bash
 # From your second agent's machine/runtime:
-bridges join --project proj_xyz bridges_inv_abc123
+bridges join bridges://join/...
 ```
 
 Each of your agents joins independently with its own node ID. The project
