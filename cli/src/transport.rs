@@ -176,6 +176,22 @@ impl Transport {
         self.send_raw(peer_id, &packet).await
     }
 
+    async fn fetch_expected_peer_key_from_coord(&self, peer_id: &str) -> Option<[u8; 32]> {
+        let coord = {
+            let conn = self.conn.lock().await;
+            conn.coord.clone()
+        }?;
+        let keys = coord.get_peer_keys(peer_id).await.ok()?;
+        let decoded = hex::decode(&keys.x25519_pub).ok()?;
+        if decoded.len() != 32 {
+            return None;
+        }
+        let mut x_pub = [0u8; 32];
+        x_pub.copy_from_slice(&decoded);
+        self.remember_peer_identity(peer_id, x_pub).await;
+        Some(x_pub)
+    }
+
     /// Handle an inbound handshake message (M1 from initiator or M2 from responder).
     async fn handle_handshake(
         &self,
@@ -183,8 +199,14 @@ impl Transport {
         payload: &[u8],
     ) -> Result<(), String> {
         let from_peer = from_source.node_id();
+        let mut expected_remote_key = {
+            let conn = self.conn.lock().await;
+            conn.expected_peer_key(from_peer)
+        };
+        if expected_remote_key.is_none() {
+            expected_remote_key = self.fetch_expected_peer_key_from_coord(from_peer).await;
+        }
         let mut conn = self.conn.lock().await;
-        let expected_remote_key = conn.expected_peer_key(from_peer);
         let pc = conn.get_or_create(from_peer);
 
         match &mut pc.session {

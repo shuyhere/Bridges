@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::DaemonConfig;
 use crate::connmgr::ConnManager;
-use crate::coord_client::{CoordClient, EndpointHint, MemberInfo};
+use crate::coord_client::{CoordClient, EndpointHint, MemberInfo, PeerKeys};
 use crate::derp_client::DerpClient;
 use crate::identity;
 use crate::listener::dispatch;
@@ -150,6 +151,92 @@ async fn encode_mailbox_blob(
     )
 }
 
+async fn seed_transport_identities_from_projects<F, Fut>(
+    transport: &Transport,
+    my_node_id: &str,
+    project_ids: &[String],
+    mut fetch_keys: F,
+) -> usize
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<Vec<PeerKeys>, String>>,
+{
+    let mut seeded = HashSet::new();
+    for project_id in project_ids {
+        let keys = match fetch_keys(project_id).await {
+            Ok(keys) => keys,
+            Err(err) => {
+                eprintln!(
+                    "  identity prewarm failed for project {}: {}",
+                    project_id, err
+                );
+                continue;
+            }
+        };
+
+        for key in keys {
+            if key.node_id == my_node_id || seeded.contains(&key.node_id) {
+                continue;
+            }
+            let decoded = match hex::decode(&key.x25519_pub) {
+                Ok(decoded) if decoded.len() == 32 => decoded,
+                Ok(decoded) => {
+                    eprintln!(
+                        "  identity prewarm skipped {}: invalid x25519 key length {}",
+                        key.node_id,
+                        decoded.len()
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "  identity prewarm skipped {}: bad x25519 key: {}",
+                        key.node_id, err
+                    );
+                    continue;
+                }
+            };
+            let mut x_pub = [0u8; 32];
+            x_pub.copy_from_slice(&decoded);
+            transport.remember_peer_identity(&key.node_id, x_pub).await;
+            seeded.insert(key.node_id);
+        }
+    }
+
+    seeded.len()
+}
+
+async fn prewarm_transport_identities(
+    transport: &Transport,
+    coord: &CoordClient,
+    my_node_id: &str,
+) -> usize {
+    let project_ids = match crate::db::open_db().and_then(|conn| {
+        crate::db::init_db(&conn)?;
+        Ok(crate::queries::list_projects(&conn)
+            .into_iter()
+            .map(|project| project.project_id)
+            .collect::<Vec<_>>())
+    }) {
+        Ok(project_ids) => project_ids,
+        Err(err) => {
+            eprintln!("  identity prewarm skipped: local db unavailable: {}", err);
+            return 0;
+        }
+    };
+
+    if project_ids.is_empty() {
+        return 0;
+    }
+
+    seed_transport_identities_from_projects(transport, my_node_id, &project_ids, |project_id| {
+        let coord = coord.clone();
+        let project_id = project_id.to_string();
+        async move { coord.get_project_keys(&project_id).await }
+    })
+    .await
+}
+
 /// Run the Bridges daemon. Blocks until interrupted.
 pub async fn run(_foreground: bool) -> Result<(), String> {
     let (signing_key, verifying_key) =
@@ -218,6 +305,13 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let conn_mgr = ConnManager::new(Some(coord.clone()));
     let transport = Transport::new(conn_mgr, derp, node_id.clone(), x_priv).await?;
     let transport = Arc::new(transport);
+    let prewarmed = prewarm_transport_identities(transport.as_ref(), &coord, &node_id).await;
+    if prewarmed > 0 {
+        println!(
+            "  prewarmed {} peer identities from project keys",
+            prewarmed
+        );
+    }
 
     println!("  runtime: {} ({})", cfg.runtime, cfg.runtime);
 
@@ -537,4 +631,50 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     api_handle.abort();
     recv_handle.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coord_client::PeerKeys;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn test_transport(node_id: &str) -> Transport {
+        let signing = SigningKey::generate(&mut OsRng);
+        let x_priv = crate::crypto::ed25519_to_x25519_private(&signing.to_bytes());
+        Transport::new_for_tests(ConnManager::new(None), None, node_id.to_string(), x_priv)
+    }
+
+    #[tokio::test]
+    async fn seed_transport_identities_from_projects_primes_first_contact_cache() {
+        let transport = test_transport("kd_self");
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crate::crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes())
+                .unwrap();
+        let project_ids = vec!["proj_1".to_string()];
+
+        let seeded = seed_transport_identities_from_projects(
+            &transport,
+            "kd_self",
+            &project_ids,
+            |_project_id| async {
+                Ok(vec![PeerKeys {
+                    node_id: "kd_peer".to_string(),
+                    ed25519_pub: "unused".to_string(),
+                    x25519_pub: hex::encode(peer_x25519),
+                }])
+            },
+        )
+        .await;
+
+        assert_eq!(seeded, 1);
+        let conn = transport.conn.lock().await;
+        assert_eq!(
+            conn.resolve_peer_id(&crate::crypto::node_id_wire_id("kd_peer")),
+            Some("kd_peer".to_string())
+        );
+        assert_eq!(conn.expected_peer_key("kd_peer"), Some(peer_x25519));
+    }
 }
