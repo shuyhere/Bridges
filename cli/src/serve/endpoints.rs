@@ -52,11 +52,11 @@ async fn get_endpoints(
     }
     let hints_json: String = db
         .query_row(
-            "SELECT endpoint_hints FROM registered_nodes WHERE node_id = ?1",
+            "SELECT endpoint_hints FROM registered_nodes WHERE node_id = ?1 AND revoked_at IS NULL",
             rusqlite::params![node_id],
             |row| row.get(0),
         )
-        .unwrap_or_else(|_| "[]".to_string());
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     let hints: Vec<EndpointHint> = serde_json::from_str(&hints_json).unwrap_or_default();
     Ok(Json(hints))
 }
@@ -136,6 +136,35 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_endpoints_hides_revoked_nodes() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_privacy", &["kd_viewer", "kd_target"]);
+        seed_endpoint_hints(
+            &state,
+            "kd_target",
+            &[EndpointHint {
+                addr: "198.51.100.10:7000".to_string(),
+                hint_type: "stun".to_string(),
+            }],
+        );
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "UPDATE registered_nodes SET revoked_at = ?1 WHERE node_id = ?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), "kd_target"],
+        )
+        .unwrap();
+
+        let result = get_endpoints(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Path("kd_target".to_string()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

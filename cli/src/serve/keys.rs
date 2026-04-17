@@ -78,7 +78,7 @@ async fn get_keys(
         return Err(StatusCode::FORBIDDEN);
     }
     db.query_row(
-        "SELECT node_id, ed25519_pubkey, x25519_pubkey FROM registered_nodes WHERE node_id = ?1",
+        "SELECT node_id, ed25519_pubkey, x25519_pubkey FROM registered_nodes WHERE node_id = ?1 AND revoked_at IS NULL",
         rusqlite::params![node_id],
         |row| {
             Ok(KeysResp {
@@ -118,7 +118,7 @@ async fn list_keys(
             "SELECT r.node_id, r.ed25519_pubkey, r.x25519_pubkey \
              FROM registered_nodes r \
              JOIN server_members m ON r.node_id = m.node_id \
-             WHERE m.project_id = ?1",
+             WHERE m.project_id = ?1 AND r.revoked_at IS NULL",
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let keys = stmt
@@ -205,6 +205,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_keys_hides_revoked_nodes() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_keys", &["kd_viewer", "kd_target"]);
+        seed_registered_node(&state, "kd_target", "ed_target");
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "UPDATE registered_nodes SET revoked_at = ?1 WHERE node_id = ?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), "kd_target"],
+        )
+        .unwrap();
+
+        let result = get_keys(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Query(KeysQuery { project: None }),
+            Path("kd_target".to_string()),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn list_keys_requires_project_membership() {
         let state = super::super::make_test_state();
         seed_project_membership(&state, "proj_keys", &["kd_target"]);
@@ -242,5 +265,31 @@ mod tests {
         assert!(keys
             .iter()
             .any(|key| { key.node_id == "kd_target" && key.ed25519_pubkey == "ed_target" }));
+    }
+
+    #[tokio::test]
+    async fn list_keys_excludes_revoked_members() {
+        let state = super::super::make_test_state();
+        seed_project_membership(&state, "proj_keys", &["kd_viewer", "kd_target"]);
+        seed_registered_node(&state, "kd_target", "ed_target");
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "UPDATE registered_nodes SET revoked_at = ?1 WHERE node_id = ?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), "kd_target"],
+        )
+        .unwrap();
+
+        let keys = list_keys(
+            State(state),
+            Extension(AuthNode("kd_viewer".to_string())),
+            Query(KeysQuery {
+                project: Some("proj_keys".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(keys.is_empty());
     }
 }

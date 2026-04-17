@@ -39,8 +39,8 @@ impl ClientConfig {
     /// Load or exit with helpful error.
     pub fn load_or_exit() -> Self {
         match Self::load() {
-            Ok(Some(cfg)) => cfg,
-            Ok(None) => {
+            Ok(Some(cfg)) if !cfg.api_key.trim().is_empty() => cfg,
+            Ok(Some(_)) | Ok(None) => {
                 eprintln!("Not registered. Run: bridges register --coordination <url>");
                 std::process::exit(1);
             }

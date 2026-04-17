@@ -2,8 +2,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Json, Router};
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
 use base64::Engine as _;
 use ed25519_dalek::VerifyingKey;
 use rand::Rng;
@@ -52,6 +52,42 @@ pub struct RegisterResp {
     pub api_key: String,
     #[serde(rename = "nodeId")]
     pub node_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct RevokeReq {
+    pub reason: Option<String>,
+    #[serde(rename = "replacementNodeId")]
+    pub replacement_node_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ReplaceReq {
+    #[serde(rename = "newNodeId")]
+    pub new_node_id: String,
+    #[serde(rename = "newApiKey")]
+    pub new_api_key: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LifecycleResp {
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
+    #[serde(rename = "revokedAt")]
+    pub revoked_at: Option<String>,
+    #[serde(rename = "replacementNodeId")]
+    pub replacement_node_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplaceResp {
+    #[serde(rename = "oldNodeId")]
+    pub old_node_id: String,
+    #[serde(rename = "newNodeId")]
+    pub new_node_id: String,
+    #[serde(rename = "migratedProjectCount")]
+    pub migrated_project_count: i64,
 }
 
 struct ValidatedRegisterReq {
@@ -113,7 +149,10 @@ pub fn routes(state: Arc<ServerState>) -> Router {
         .with_state(state.clone());
 
     let protected = Router::new()
+        .route("/v1/auth/me", get(me))
         .route("/v1/auth/refresh", post(refresh))
+        .route("/v1/auth/revoke", post(revoke))
+        .route("/v1/auth/replace", post(replace))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -135,16 +174,19 @@ async fn register(
     let db = state
         .open_connection()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let existing: Option<(String, String)> = db
+    let existing: Option<(String, String, Option<String>)> = db
         .query_row(
-            "SELECT ed25519_pubkey, x25519_pubkey FROM registered_nodes WHERE node_id = ?1",
+            "SELECT ed25519_pubkey, x25519_pubkey, revoked_at FROM registered_nodes WHERE node_id = ?1",
             rusqlite::params![validated.node_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if let Some((existing_ed25519, existing_x25519)) = existing {
+    if let Some((existing_ed25519, existing_x25519, revoked_at)) = existing {
+        if revoked_at.is_some() {
+            return Err(StatusCode::GONE);
+        }
         if existing_ed25519 != validated.ed25519_pubkey
             || existing_x25519 != validated.x25519_pubkey
         {
@@ -185,6 +227,28 @@ async fn register(
     }))
 }
 
+async fn me(
+    State(state): State<Arc<ServerState>>,
+    Extension(auth): Extension<AuthNode>,
+) -> Result<Json<LifecycleResp>, StatusCode> {
+    let db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    db.query_row(
+        "SELECT node_id, revoked_at, replacement_node_id FROM registered_nodes WHERE node_id = ?1",
+        rusqlite::params![auth.0],
+        |row| {
+            Ok(LifecycleResp {
+                node_id: row.get(0)?,
+                revoked_at: row.get(1)?,
+                replacement_node_id: row.get(2)?,
+            })
+        },
+    )
+    .map(Json)
+    .map_err(|_| StatusCode::NOT_FOUND)
+}
+
 async fn refresh(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -205,6 +269,131 @@ async fn refresh(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(RegisterResp { api_key, node_id }))
+}
+
+async fn revoke(
+    State(state): State<Arc<ServerState>>,
+    Extension(auth): Extension<AuthNode>,
+    Json(req): Json<RevokeReq>,
+) -> Result<Json<LifecycleResp>, StatusCode> {
+    let replacement_node_id = normalize_optional_text(req.replacement_node_id.as_deref());
+    if replacement_node_id.as_deref() == Some(auth.0.as_str()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let revoked_at = chrono::Utc::now().to_rfc3339();
+    let reason = normalize_optional_text(req.reason.as_deref());
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tx = db
+        .transaction()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(replacement_node_id) = replacement_node_id.as_deref() {
+        let replacement_exists = tx
+            .query_row(
+                "SELECT 1 FROM registered_nodes WHERE node_id = ?1 AND revoked_at IS NULL",
+                rusqlite::params![replacement_node_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some();
+        if !replacement_exists {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    tx.execute(
+        "UPDATE registered_nodes SET revoked_at = ?1, revocation_reason = ?2, replacement_node_id = ?3, endpoint_hints = NULL, api_key_hash = '' WHERE node_id = ?4",
+        rusqlite::params![revoked_at, reason, replacement_node_id, auth.0],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(LifecycleResp {
+        node_id: auth.0,
+        revoked_at: Some(revoked_at),
+        replacement_node_id,
+    }))
+}
+
+async fn replace(
+    State(state): State<Arc<ServerState>>,
+    Extension(auth): Extension<AuthNode>,
+    Json(req): Json<ReplaceReq>,
+) -> Result<Json<ReplaceResp>, StatusCode> {
+    if req.new_node_id == auth.0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let reason = normalize_optional_text(req.reason.as_deref())
+        .or_else(|| Some("replaced_by_rotation".to_string()));
+    let new_api_key_hash = hash_api_key(&req.new_api_key);
+
+    let mut db = state
+        .open_connection()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tx = db
+        .transaction()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let replacement_exists = tx
+        .query_row(
+            "SELECT 1 FROM registered_nodes WHERE node_id = ?1 AND api_key_hash = ?2 AND revoked_at IS NULL",
+            rusqlite::params![req.new_node_id, new_api_key_hash],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_some();
+    if !replacement_exists {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let migrated_project_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM server_members WHERE node_id = ?1",
+            rusqlite::params![auth.0],
+            |row| row.get(0),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.execute(
+        "INSERT INTO server_members (project_id, node_id, agent_role, joined_at)
+         SELECT project_id, ?1, agent_role, ?2 FROM server_members WHERE node_id = ?3
+         ON CONFLICT(project_id, node_id) DO UPDATE SET agent_role = excluded.agent_role",
+        rusqlite::params![req.new_node_id, now, auth.0],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.execute(
+        "DELETE FROM server_members WHERE node_id = ?1",
+        rusqlite::params![auth.0],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.execute(
+        "UPDATE server_projects SET created_by = ?1 WHERE created_by = ?2",
+        rusqlite::params![req.new_node_id, auth.0],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.execute(
+        "UPDATE registered_nodes SET revoked_at = ?1, revocation_reason = ?2, replacement_node_id = ?3, endpoint_hints = NULL, api_key_hash = '' WHERE node_id = ?4",
+        rusqlite::params![now, reason, req.new_node_id, auth.0],
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tx.commit().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ReplaceResp {
+        old_node_id: auth.0,
+        new_node_id: req.new_node_id,
+        migrated_project_count,
+    }))
 }
 
 /// Middleware: verify Bearer token against `registered_nodes.api_key_hash` and inject `AuthNode`.
@@ -231,7 +420,7 @@ pub async fn auth_middleware(
     };
     let node_id: Option<String> = db
         .query_row(
-            "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1",
+            "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1 AND revoked_at IS NULL",
             rusqlite::params![token_hash],
             |row| row.get(0),
         )
@@ -255,7 +444,7 @@ pub async fn extract_node_id(state: &ServerState, headers: &HeaderMap) -> Option
     let db = state.open_connection().ok()?;
 
     db.query_row(
-        "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1",
+        "SELECT node_id FROM registered_nodes WHERE api_key_hash = ?1 AND revoked_at IS NULL",
         rusqlite::params![token_hash],
         |row| row.get(0),
     )
@@ -283,6 +472,34 @@ mod tests {
             display_name: Some("node".to_string()),
             owner_name: Some("owner".to_string()),
         }
+    }
+
+    fn auth_headers(api_key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", api_key).parse().unwrap(),
+        );
+        headers
+    }
+
+    fn seed_project_membership(
+        state: &Arc<ServerState>,
+        project_id: &str,
+        node_id: &str,
+        role: &str,
+    ) {
+        let db = state.open_connection().unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO server_projects (project_id, slug, display_name, description, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![project_id, project_id, project_id, Option::<String>::None, node_id, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO server_members (project_id, node_id, agent_role, joined_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![project_id, node_id, role, chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -360,11 +577,7 @@ mod tests {
         let req = register_req_from_signing(&signing);
         let registered = register(State(state.clone()), Json(req)).await.unwrap().0;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "authorization",
-            format!("Bearer {}", registered.api_key).parse().unwrap(),
-        );
+        let headers = auth_headers(&registered.api_key);
         let refreshed = refresh(State(state.clone()), headers.clone())
             .await
             .unwrap()
@@ -373,12 +586,118 @@ mod tests {
         let old = extract_node_id(&state, &headers).await;
         assert!(old.is_none());
 
-        let mut new_headers = HeaderMap::new();
-        new_headers.insert(
-            "authorization",
-            format!("Bearer {}", refreshed.api_key).parse().unwrap(),
-        );
+        let new_headers = auth_headers(&refreshed.api_key);
         let node_id = extract_node_id(&state, &new_headers).await;
         assert_eq!(node_id.as_deref(), Some(refreshed.node_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn revoke_invalidates_auth_and_records_replacement() {
+        let state = test_state();
+        let old = SigningKey::generate(&mut OsRng);
+        let old_registered = register(State(state.clone()), Json(register_req_from_signing(&old)))
+            .await
+            .unwrap()
+            .0;
+
+        let replacement = SigningKey::generate(&mut OsRng);
+        let replacement_registered = register(
+            State(state.clone()),
+            Json(register_req_from_signing(&replacement)),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let response = revoke(
+            State(state.clone()),
+            Extension(AuthNode(old_registered.node_id.clone())),
+            Json(RevokeReq {
+                reason: Some("compromised".to_string()),
+                replacement_node_id: Some(replacement_registered.node_id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(response.revoked_at.is_some());
+        assert_eq!(
+            response.replacement_node_id.as_deref(),
+            Some(replacement_registered.node_id.as_str())
+        );
+        assert!(
+            extract_node_id(&state, &auth_headers(&old_registered.api_key))
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_migrates_memberships_and_revokes_old_node() {
+        let state = test_state();
+        let old = SigningKey::generate(&mut OsRng);
+        let old_registered = register(State(state.clone()), Json(register_req_from_signing(&old)))
+            .await
+            .unwrap()
+            .0;
+        let replacement = SigningKey::generate(&mut OsRng);
+        let replacement_registered = register(
+            State(state.clone()),
+            Json(register_req_from_signing(&replacement)),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        seed_project_membership(&state, "proj_rotate", &old_registered.node_id, "owner");
+
+        let response = replace(
+            State(state.clone()),
+            Extension(AuthNode(old_registered.node_id.clone())),
+            Json(ReplaceReq {
+                new_node_id: replacement_registered.node_id.clone(),
+                new_api_key: replacement_registered.api_key.clone(),
+                reason: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(response.old_node_id, old_registered.node_id);
+        assert_eq!(response.new_node_id, replacement_registered.node_id);
+        assert_eq!(response.migrated_project_count, 1);
+        assert!(
+            extract_node_id(&state, &auth_headers(&old_registered.api_key))
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            extract_node_id(&state, &auth_headers(&replacement_registered.api_key))
+                .await
+                .as_deref(),
+            Some(replacement_registered.node_id.as_str())
+        );
+
+        let db = state.open_connection().unwrap();
+        let role: String = db
+            .query_row(
+                "SELECT agent_role FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+                rusqlite::params!["proj_rotate", replacement_registered.node_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role, "owner");
+        let old_member_exists = db
+            .query_row(
+                "SELECT 1 FROM server_members WHERE project_id = ?1 AND node_id = ?2",
+                rusqlite::params!["proj_rotate", old_registered.node_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_some();
+        assert!(!old_member_exists);
     }
 }

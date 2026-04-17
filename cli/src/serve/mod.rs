@@ -52,6 +52,9 @@ pub fn init_server_db(conn: &Connection) -> Result<(), ServerInitError> {
         .map_err(ServerInitError::Schema)?;
 
     add_column_if_missing(conn, "registered_nodes", "endpoint_hints", "TEXT")?;
+    add_column_if_missing(conn, "registered_nodes", "revoked_at", "TEXT")?;
+    add_column_if_missing(conn, "registered_nodes", "revocation_reason", "TEXT")?;
+    add_column_if_missing(conn, "registered_nodes", "replacement_node_id", "TEXT")?;
 
     migrate_registered_nodes_to_core(conn)?;
     migrate_server_projects_to_core(conn)?;
@@ -103,14 +106,17 @@ fn migrate_registered_nodes_to_core(conn: &Connection) -> Result<(), ServerInitE
         r#"
         DROP TABLE IF EXISTS registered_nodes_new;
         CREATE TABLE registered_nodes_new (
-            node_id         TEXT PRIMARY KEY,
-            ed25519_pubkey  TEXT NOT NULL,
-            x25519_pubkey   TEXT NOT NULL,
-            display_name    TEXT,
-            owner_name      TEXT,
-            api_key_hash    TEXT NOT NULL,
-            endpoint_hints  TEXT,
-            created_at      TEXT NOT NULL
+            node_id             TEXT PRIMARY KEY,
+            ed25519_pubkey      TEXT NOT NULL,
+            x25519_pubkey       TEXT NOT NULL,
+            display_name        TEXT,
+            owner_name          TEXT,
+            api_key_hash        TEXT NOT NULL,
+            endpoint_hints      TEXT,
+            revoked_at          TEXT,
+            revocation_reason   TEXT,
+            replacement_node_id TEXT,
+            created_at          TEXT NOT NULL
         );
 
         INSERT INTO registered_nodes_new (
@@ -121,6 +127,9 @@ fn migrate_registered_nodes_to_core(conn: &Connection) -> Result<(), ServerInitE
             owner_name,
             api_key_hash,
             endpoint_hints,
+            revoked_at,
+            revocation_reason,
+            replacement_node_id,
             created_at
         )
         SELECT
@@ -131,6 +140,9 @@ fn migrate_registered_nodes_to_core(conn: &Connection) -> Result<(), ServerInitE
             owner_name,
             api_key_hash,
             endpoint_hints,
+            revoked_at,
+            revocation_reason,
+            replacement_node_id,
             created_at
         FROM registered_nodes;
 
@@ -241,14 +253,17 @@ pub async fn run(port: u16, db_path: &str) -> Result<(), String> {
 
 const SERVER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS registered_nodes (
-    node_id         TEXT PRIMARY KEY,
-    ed25519_pubkey  TEXT NOT NULL,
-    x25519_pubkey   TEXT NOT NULL,
-    display_name    TEXT,
-    owner_name      TEXT,
-    api_key_hash    TEXT NOT NULL,
-    endpoint_hints  TEXT,
-    created_at      TEXT NOT NULL
+    node_id             TEXT PRIMARY KEY,
+    ed25519_pubkey      TEXT NOT NULL,
+    x25519_pubkey       TEXT NOT NULL,
+    display_name        TEXT,
+    owner_name          TEXT,
+    api_key_hash        TEXT NOT NULL,
+    endpoint_hints      TEXT,
+    revoked_at          TEXT,
+    revocation_reason   TEXT,
+    replacement_node_id TEXT,
+    created_at          TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS server_projects (

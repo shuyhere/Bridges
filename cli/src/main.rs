@@ -90,6 +90,11 @@ enum Commands {
     },
     /// Show node identity and project status
     Status,
+    /// Manage local identity lifecycle
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
     /// Run local diagnostics for daemon, coordination, runtime, project, and peer state
     Doctor {
         /// Optional project ID for project-scoped diagnostics
@@ -199,6 +204,19 @@ enum ServiceAction {
 }
 
 #[derive(Subcommand)]
+enum IdentityAction {
+    /// Show current identity and registration state
+    Status,
+    /// Replace the current node with a freshly generated identity and migrate memberships
+    Rotate,
+    /// Revoke the current node identity
+    Revoke {
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SessionAction {
     /// List sessions for a peer in a project
     List {
@@ -288,6 +306,13 @@ fn main() {
         Commands::Doctor { project, peer } => {
             commands::cmd_doctor(project.as_deref(), peer.as_deref());
         }
+        Commands::Identity { action } => match action {
+            IdentityAction::Status => commands::cmd_identity_status(),
+            IdentityAction::Rotate => commands::cmd_identity_rotate(),
+            IdentityAction::Revoke { reason } => {
+                commands::cmd_identity_revoke(reason.as_deref());
+            }
+        },
         Commands::Register { coordination } => {
             commands::cmd_register(&coordination, None);
         }

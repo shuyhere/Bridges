@@ -35,12 +35,28 @@ fn keypair_path() -> Result<PathBuf, IdentityError> {
     Ok(identity_dir()?.join("keypair.json"))
 }
 
+pub fn replace_keypair(signing: &SigningKey) -> Result<PathBuf, IdentityError> {
+    save_keypair(signing)?;
+    keypair_path()
+}
+
+fn generate_signing_key() -> SigningKey {
+    SigningKey::generate(&mut OsRng)
+}
+
 /// Generate a fresh Ed25519 keypair and persist it.
 pub fn generate_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
-    let signing = SigningKey::generate(&mut OsRng);
+    let signing = generate_signing_key();
     let verifying = signing.verifying_key();
     save_keypair(&signing)?;
     Ok((signing, verifying))
+}
+
+/// Generate a fresh Ed25519 keypair without persisting it.
+pub fn generate_ephemeral_keypair() -> (SigningKey, VerifyingKey) {
+    let signing = generate_signing_key();
+    let verifying = signing.verifying_key();
+    (signing, verifying)
 }
 
 fn load_keypair() -> Result<(SigningKey, VerifyingKey), IdentityError> {
