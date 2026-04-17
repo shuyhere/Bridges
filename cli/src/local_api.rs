@@ -196,6 +196,16 @@ pub async fn serve(state: Arc<ApiState>, port: u16) -> Result<(), String> {
         .map_err(|e| format!("serve: {}", e))
 }
 
+fn decode_peer_x25519_pub(hex_value: &str) -> Result<[u8; 32], String> {
+    let decoded = hex::decode(hex_value).map_err(|e| format!("bad x25519 pubkey: {}", e))?;
+    if decoded.len() != 32 {
+        return Err("x25519 pubkey wrong length".to_string());
+    }
+    let mut x_pub = [0u8; 32];
+    x_pub.copy_from_slice(&decoded);
+    Ok(x_pub)
+}
+
 /// Ensure Noise handshake is complete with a peer, then encrypt and send.
 async fn encrypt_and_send(
     state: &ApiState,
@@ -222,21 +232,25 @@ async fn encrypt_and_send(
         state.coord.get_peer_keys(peer_id).await
     };
 
-    let relay_encrypted = || async {
-        let keys = resolve_peer_keys().await?;
-        let decoded =
-            hex::decode(&keys.x25519_pub).map_err(|e| format!("bad x25519 pubkey: {}", e))?;
-        if decoded.len() != 32 {
-            return Err("x25519 pubkey wrong length".to_string());
+    let fresh_keys = match resolve_peer_keys().await {
+        Ok(keys) => keys,
+        Err(err) => {
+            state.transport.forget_peer_identity(peer_id).await;
+            return Err(err);
         }
-        let mut x_pub = [0u8; 32];
-        x_pub.copy_from_slice(&decoded);
-        state.transport.remember_peer_identity(peer_id, x_pub).await;
+    };
+    let fresh_x_pub = decode_peer_x25519_pub(&fresh_keys.x25519_pub)?;
+    state
+        .transport
+        .remember_peer_identity(peer_id, fresh_x_pub)
+        .await;
+
+    let relay_encrypted = || async {
         let blob = crate::crypto::encrypt_mailbox_payload(
             &state.node_id,
             peer_id,
             &state.my_x25519_priv,
-            &x_pub,
+            &fresh_x_pub,
             &plaintext,
         )?;
         state.coord.relay_message(peer_id, &blob, project_id).await
@@ -266,16 +280,7 @@ async fn encrypt_and_send(
             }
         }
 
-        let keys = resolve_peer_keys().await?;
-        let mut x_pub = [0u8; 32];
-        let decoded =
-            hex::decode(&keys.x25519_pub).map_err(|e| format!("bad x25519 pubkey: {}", e))?;
-        if decoded.len() != 32 {
-            return Err("x25519 pubkey wrong length".to_string());
-        }
-        x_pub.copy_from_slice(&decoded);
-        state.transport.remember_peer_identity(peer_id, x_pub).await;
-        if let Err(e) = state.transport.handshake(peer_id, &x_pub).await {
+        if let Err(e) = state.transport.handshake(peer_id, &fresh_x_pub).await {
             eprintln!(
                 "  direct handshake to {} failed ({}), using server relay",
                 peer_id, e

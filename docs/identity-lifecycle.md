@@ -41,6 +41,7 @@ A revoked node:
 - cannot continue authenticating with its old API key
 - is hidden from key lookup
 - is hidden from endpoint lookup
+- is pruned from project-scoped transport identity caches during daemon refresh
 - may still appear in historical local state until local caches are refreshed or rewritten
 
 A replacement node:
@@ -56,6 +57,8 @@ Bridges currently guarantees that:
 - replacement is coordinated through the server, not guessed by peers
 - membership migration preserves the member role for migrated projects
 - old node API keys are invalidated when the old node is revoked/replaced
+- direct sends now refresh peer key visibility against coordination before use, so revoked or no-longer-visible peers stop being valid send targets
+- daemon transport caches for project peers are refreshed and stale peer identities are pruned during background coordination refresh
 
 ## Current non-guarantees
 
@@ -63,9 +66,20 @@ Bridges does **not** yet guarantee:
 
 - seamless continuity of in-flight sessions
 - mailbox re-binding or replay across a replacement event
-- automatic peer-side cache refresh without a fresh lookup/diagnostic cycle
-- federation-wide revocation propagation
 - preservation of the old node ID after key change
+- federation-wide revocation propagation
+
+## Mailbox and session semantics during rotation/revocation
+
+Current behavior is intentionally conservative:
+
+- pending mailbox entries addressed to the old node remain bound to the old node
+- rotation does **not** migrate mailbox contents from the old node to the replacement node
+- response/session history stored locally is not rewritten to the new node ID
+- established direct Noise sessions may be dropped once transport identity caches are refreshed and stale peers are pruned
+- future sends re-check coordination visibility and will fail for revoked or no-longer-visible peers instead of silently reusing stale trust state
+
+Operationally, this means replacement is safe, but not seamless: after a rotation, peers may need to re-establish contact naturally through fresh lookups and new sessions.
 
 ## Operational guidance
 

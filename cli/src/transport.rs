@@ -88,6 +88,21 @@ impl Transport {
         conn.remember_peer_identity(peer_id, expected_x25519_pub);
     }
 
+    /// Forget a peer's cached transport/session identity.
+    pub async fn forget_peer_identity(&self, peer_id: &str) {
+        let mut conn = self.conn.lock().await;
+        conn.forget_peer_identity(peer_id);
+    }
+
+    /// Retain only the listed peer identities in the transport cache.
+    pub async fn retain_peer_identities(
+        &self,
+        retain: &std::collections::HashSet<String>,
+    ) -> usize {
+        let mut conn = self.conn.lock().await;
+        conn.retain_peer_identities(retain)
+    }
+
     async fn note_inbound_activity(&self, peer_id: &str) {
         let mut conn = self.conn.lock().await;
         conn.note_inbound(peer_id);
@@ -476,6 +491,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("did not match packet header"));
+    }
+
+    #[tokio::test]
+    async fn forget_peer_identity_removes_cached_wire_mapping() {
+        let transport = test_transport("kd_self");
+        transport.remember_peer_identity("kd_peer", [7u8; 32]).await;
+        transport.forget_peer_identity("kd_peer").await;
+
+        let err = transport
+            .resolve_packet_source(RawPacketSource::Udp, crypto::node_id_wire_id("kd_peer"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("unresolved direct packet source"));
     }
 
     #[tokio::test]

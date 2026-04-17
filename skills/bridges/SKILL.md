@@ -237,6 +237,8 @@ Current contract:
 - V1 rotation is implemented as node replacement + revocation
 - `bridges identity rotate` creates a fresh node, migrates memberships, revokes the old node, and updates local config
 - revoked nodes stop authenticating and are hidden from key/endpoint lookup
+- project-scoped transport identity caches are refreshed so stale peers are pruned after coordination refresh
+- mailbox contents and conversation/session history are not migrated to the replacement node automatically
 - after any rotation or revocation, run `bridges doctor`
 
 ### Projects

@@ -96,6 +96,22 @@ impl ConnManager {
         pc.expected_x25519_pub = Some(expected_x25519_pub);
     }
 
+    /// Forget a peer's cached transport/session identity.
+    pub fn forget_peer_identity(&mut self, peer_id: &str) {
+        let wire_id = crypto::node_id_wire_id(peer_id);
+        self.peer_ids_by_wire_id.remove(&wire_id);
+        self.peers.remove(peer_id);
+    }
+
+    /// Retain only the listed peer identities in the transport cache.
+    pub fn retain_peer_identities(&mut self, retain: &std::collections::HashSet<String>) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|peer_id, _| retain.contains(peer_id));
+        self.peer_ids_by_wire_id
+            .retain(|_, peer_id| retain.contains(peer_id));
+        before.saturating_sub(self.peers.len())
+    }
+
     /// Resolve a 20-byte wire ID back to the canonical Bridges node ID.
     pub fn resolve_peer_id(&self, wire_id: &[u8; 20]) -> Option<String> {
         self.peer_ids_by_wire_id.get(wire_id).cloned()

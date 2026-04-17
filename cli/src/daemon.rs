@@ -207,35 +207,66 @@ where
     seeded.len()
 }
 
-async fn prewarm_transport_identities(
+fn load_local_project_ids() -> Result<Vec<String>, String> {
+    let conn = crate::db::open_db().map_err(|err| format!("open local db: {}", err))?;
+    crate::db::init_db(&conn).map_err(|err| format!("init local db: {}", err))?;
+    Ok(crate::queries::list_projects(&conn)
+        .into_iter()
+        .map(|project| project.project_id)
+        .collect())
+}
+
+async fn sync_transport_identities_from_projects(
     transport: &Transport,
     coord: &CoordClient,
     my_node_id: &str,
-) -> usize {
-    let project_ids = match crate::db::open_db().and_then(|conn| {
-        crate::db::init_db(&conn)?;
-        Ok(crate::queries::list_projects(&conn)
-            .into_iter()
-            .map(|project| project.project_id)
-            .collect::<Vec<_>>())
-    }) {
+) -> (usize, usize) {
+    let project_ids = match load_local_project_ids() {
         Ok(project_ids) => project_ids,
         Err(err) => {
-            eprintln!("  identity prewarm skipped: local db unavailable: {}", err);
-            return 0;
+            eprintln!("  identity sync skipped: local db unavailable: {}", err);
+            return (0, 0);
         }
     };
 
     if project_ids.is_empty() {
-        return 0;
+        let retain = std::collections::HashSet::new();
+        let pruned = transport.retain_peer_identities(&retain).await;
+        return (0, pruned);
     }
 
-    seed_transport_identities_from_projects(transport, my_node_id, &project_ids, |project_id| {
-        let coord = coord.clone();
-        let project_id = project_id.to_string();
-        async move { coord.get_project_keys(&project_id).await }
-    })
-    .await
+    let seeded = seed_transport_identities_from_projects(
+        transport,
+        my_node_id,
+        &project_ids,
+        |project_id| {
+            let coord = coord.clone();
+            let project_id = project_id.to_string();
+            async move { coord.get_project_keys(&project_id).await }
+        },
+    )
+    .await;
+
+    let mut retain = HashSet::new();
+    for project_id in &project_ids {
+        match coord.get_project_keys(project_id).await {
+            Ok(keys) => {
+                for key in keys {
+                    if key.node_id != my_node_id {
+                        retain.insert(key.node_id);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "  identity prune skipped for project {}: {}",
+                    project_id, err
+                );
+            }
+        }
+    }
+    let pruned = transport.retain_peer_identities(&retain).await;
+    (seeded, pruned)
 }
 
 /// Run the Bridges daemon. Blocks until interrupted.
@@ -330,11 +361,12 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
 
     let transport = Transport::new(conn_mgr, derp, node_id.clone(), x_priv).await?;
     let transport = Arc::new(transport);
-    let prewarmed = prewarm_transport_identities(transport.as_ref(), &coord, &node_id).await;
-    if prewarmed > 0 {
+    let (prewarmed, pruned) =
+        sync_transport_identities_from_projects(transport.as_ref(), &coord, &node_id).await;
+    if prewarmed > 0 || pruned > 0 {
         println!(
-            "  prewarmed {} peer identities from project keys",
-            prewarmed
+            "  transport identity sync: prewarmed {} peers, pruned {} stale peers",
+            prewarmed, pruned
         );
     }
 
@@ -522,9 +554,22 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let poll_runtime_endpoint = runtime_endpoint.clone();
     let poll_x_priv = x_priv;
     let poll_presence = presence.clone();
+    let poll_transport = transport.clone();
     let poll_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let (_seeded, pruned) = sync_transport_identities_from_projects(
+                poll_transport.as_ref(),
+                &poll_coord,
+                &poll_node_id,
+            )
+            .await;
+            if pruned > 0 {
+                poll_presence.lock().await.note_coord_ok(format!(
+                    "pruned {} stale transport peer identities after coordination refresh",
+                    pruned
+                ));
+            }
             let messages = match poll_coord.fetch_mailbox().await {
                 Ok(m) => {
                     let detail = if m.is_empty() {
@@ -707,6 +752,25 @@ mod tests {
         let signing = SigningKey::generate(&mut OsRng);
         let x_priv = crate::crypto::ed25519_to_x25519_private(&signing.to_bytes());
         Transport::new_for_tests(ConnManager::new(None), None, node_id.to_string(), x_priv)
+    }
+
+    #[tokio::test]
+    async fn sync_transport_identities_prunes_stale_peers() {
+        let transport = test_transport("kd_self");
+        transport
+            .remember_peer_identity("kd_peer_old", [7u8; 32])
+            .await;
+        transport
+            .remember_peer_identity("kd_peer_new", [8u8; 32])
+            .await;
+
+        let retain = std::collections::HashSet::from(["kd_peer_new".to_string()]);
+        let pruned = transport.retain_peer_identities(&retain).await;
+
+        assert_eq!(pruned, 1);
+        let conn = transport.conn.lock().await;
+        assert!(conn.expected_peer_key("kd_peer_old").is_none());
+        assert_eq!(conn.expected_peer_key("kd_peer_new"), Some([8u8; 32]));
     }
 
     #[tokio::test]
