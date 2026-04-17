@@ -174,6 +174,7 @@ Bridges is **content-private, not metadata-private**:
 - mailbox entries are durable until fetched, then deleted
 - endpoint publication reveals reachability information to authorized peers
 
+See `docs/core-architecture.md` for the canonical Bridges system overview and component map.
 See `docs/privacy-model.md` for the current privacy contract, retention model, and non-guarantees.
 See `docs/presence-model.md` for the current daemon/runtime/reachability status model.
 See `docs/permissions-model.md` for the current project role and capability model.
@@ -197,6 +198,7 @@ This repository currently ignores common local-sensitive paths such as:
 
 ## Documentation map
 
+- `docs/core-architecture.md` — canonical Bridges architecture overview, planes, trust boundaries, and code map
 - `docs/privacy-model.md` — current privacy contract, metadata visibility, and retention model
 - `docs/presence-model.md` — current daemon/runtime/reachability model and status semantics
 - `docs/permissions-model.md` — current project roles, capabilities, and enforcement boundaries
