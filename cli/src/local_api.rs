@@ -14,10 +14,51 @@ use crate::permissions::{role_has_capability, ProjectCapability};
 use crate::presence::{ComponentState, ComponentStatus, PresenceState, ReachabilityStatus};
 use crate::transport::Transport;
 
-/// Pending response from a peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryStage {
+    PendingSend,
+    HandedOffDirect,
+    HandedOffMailbox,
+    ReceivedByPeerDaemon,
+    ProcessingFailed,
+    ProcessedByPeerRuntime,
+}
+
+impl DeliveryStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingSend => "pending_send",
+            Self::HandedOffDirect => "handed_off_direct",
+            Self::HandedOffMailbox => "handed_off_mailbox",
+            Self::ReceivedByPeerDaemon => "received_by_peer_daemon",
+            Self::ProcessingFailed => "processing_failed",
+            Self::ProcessedByPeerRuntime => "processed_by_peer_runtime",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::ProcessingFailed | Self::ProcessedByPeerRuntime)
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending_send" => Some(Self::PendingSend),
+            "handed_off_direct" => Some(Self::HandedOffDirect),
+            "handed_off_mailbox" => Some(Self::HandedOffMailbox),
+            "received_by_peer_daemon" => Some(Self::ReceivedByPeerDaemon),
+            "processing_failed" => Some(Self::ProcessingFailed),
+            "processed_by_peer_runtime" => Some(Self::ProcessedByPeerRuntime),
+            _ => None,
+        }
+    }
+}
+
+/// Pending response/outcome from a peer.
 pub struct PendingResponse {
     pub response: Option<String>,
     pub from_node: Option<String>,
+    pub error: Option<String>,
+    pub stage: DeliveryStage,
     pub created_at: Instant,
     pub project_id: Option<String>,
     pub kind: Option<String>,
@@ -165,8 +206,27 @@ pub struct BroadcastResponse {
 #[derive(Debug, Serialize)]
 pub struct PollResponse {
     pub ready: bool,
+    pub terminal: bool,
+    pub stage: String,
     pub from_node: Option<String>,
     pub response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveryHandoff {
+    Direct,
+    Mailbox,
+}
+
+impl DeliveryHandoff {
+    fn stage(self) -> DeliveryStage {
+        match self {
+            Self::Direct => DeliveryStage::HandedOffDirect,
+            Self::Mailbox => DeliveryStage::HandedOffMailbox,
+        }
+    }
 }
 
 /// Build the axum router for the local API.
@@ -212,7 +272,7 @@ async fn encrypt_and_send(
     peer_id: &str,
     project_id: Option<&str>,
     payload: &serde_json::Value,
-) -> Result<(), String> {
+) -> Result<DeliveryHandoff, String> {
     use crate::connmgr::SessionState;
     use crate::noise;
 
@@ -285,17 +345,19 @@ async fn encrypt_and_send(
                 "  direct handshake to {} failed ({}), using server relay",
                 peer_id, e
             );
-            return relay_encrypted().await;
+            relay_encrypted().await?;
+            return Ok(DeliveryHandoff::Mailbox);
         }
     }
 
     // Try direct transport first (Noise IK via DERP/UDP)
     match state.transport.send(peer_id, &plaintext).await {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(DeliveryHandoff::Direct),
         Err(e) => {
             // Fallback: relay through coordination server mailbox
             eprintln!("  direct send failed ({}), using server relay", e);
-            relay_encrypted().await
+            relay_encrypted().await?;
+            Ok(DeliveryHandoff::Mailbox)
         }
     }
 }
@@ -325,6 +387,8 @@ async fn insert_pending(
         PendingResponse {
             response: None,
             from_node: None,
+            error: None,
+            stage: DeliveryStage::PendingSend,
             created_at: Instant::now(),
             project_id: if project_id.trim().is_empty() {
                 None
@@ -338,6 +402,43 @@ async fn insert_pending(
     );
     // Clean up old entries (>5 minutes)
     responses.retain(|_, v| v.created_at.elapsed().as_secs() < 300);
+}
+
+async fn note_pending_stage(
+    responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
+    request_id: &str,
+    from_node: Option<&str>,
+    stage: DeliveryStage,
+) {
+    let mut map = responses.lock().await;
+    if let Some(pending) = map.get_mut(request_id) {
+        if pending.stage.is_terminal() {
+            return;
+        }
+        pending.stage = stage;
+        if let Some(from_node) = from_node {
+            pending.from_node = Some(from_node.to_string());
+        }
+    }
+}
+
+async fn note_pending_failure(
+    responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
+    request_id: &str,
+    from_node: Option<&str>,
+    error: &str,
+) {
+    let mut map = responses.lock().await;
+    if let Some(pending) = map.get_mut(request_id) {
+        if pending.stage == DeliveryStage::ProcessedByPeerRuntime {
+            return;
+        }
+        pending.stage = DeliveryStage::ProcessingFailed;
+        pending.error = Some(error.to_string());
+        if let Some(from_node) = from_node {
+            pending.from_node = Some(from_node.to_string());
+        }
+    }
 }
 
 async fn remove_pending(state: &ApiState, request_id: &str) {
@@ -374,6 +475,31 @@ fn require_project_capability(
     }
 }
 
+/// Called by the daemon recv loop when a delivery event arrives.
+pub async fn store_delivery_event(
+    responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
+    request_id: &str,
+    from_node: &str,
+    stage: &str,
+    error: Option<&str>,
+) {
+    match DeliveryStage::from_str(stage) {
+        Some(DeliveryStage::ProcessingFailed) => {
+            note_pending_failure(
+                responses,
+                request_id,
+                Some(from_node),
+                error.unwrap_or("peer runtime processing failed"),
+            )
+            .await;
+        }
+        Some(stage) => {
+            note_pending_stage(responses, request_id, Some(from_node), stage).await;
+        }
+        None => {}
+    }
+}
+
 /// Called by the daemon recv loop when a response message arrives.
 pub async fn store_response(
     responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
@@ -386,6 +512,8 @@ pub async fn store_response(
     if let Some(pending) = map.get_mut(request_id) {
         pending.response = Some(response_text.to_string());
         pending.from_node = Some(from_node.to_string());
+        pending.error = None;
+        pending.stage = DeliveryStage::ProcessedByPeerRuntime;
         exchange = Some((
             pending.project_id.clone().unwrap_or_default(),
             pending.kind.clone().unwrap_or_else(|| "ask".to_string()),
@@ -462,9 +590,12 @@ async fn handle_send(
 
 /// Delivery semantics for `ask`:
 /// - single-target request/response
-/// - success means the request was handed to direct transport or mailbox relay, not that the peer processed it yet
-/// - no automatic retry or deduplication is performed here
-/// - responses are matched by `requestId` and pending entries expire locally after a short timeout
+/// - the sender now tracks staged outcomes for the `requestId`:
+///   - `handed_off_direct` / `handed_off_mailbox`
+///   - `received_by_peer_daemon`
+///   - `processed_by_peer_runtime` or `processing_failed`
+/// - no automatic retry or deduplication is performed here yet
+/// - pending entries expire locally after a short timeout
 async fn handle_ask(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<AskRequest>,
@@ -555,14 +686,17 @@ async fn handle_ask(
         Some(project_id)
     };
     match encrypt_and_send(&state, node_id, project_ref, &payload).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(SendResponse {
-                ok: true,
-                error: None,
-                request_id: Some(request_id),
-            }),
-        ),
+        Ok(handoff) => {
+            note_pending_stage(&state.responses, &request_id, None, handoff.stage()).await;
+            (
+                StatusCode::OK,
+                Json(SendResponse {
+                    ok: true,
+                    error: None,
+                    request_id: Some(request_id),
+                }),
+            )
+        }
         Err(e) => {
             remove_pending(&state, &request_id).await;
             (
@@ -689,9 +823,10 @@ async fn handle_broadcast(
 /// Delivery semantics for `debate`:
 /// - fanout request/response to all other project members
 /// - each successfully delivered peer gets its own `requestId`
+/// - each `requestId` can now advance through staged outcomes like `ask`
 /// - partial success returns HTTP 200 with `ok=false`, plus only the `request_ids` that were actually sent
 /// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
-/// - no retry, deduplication, or cross-peer ordering guarantee is provided
+/// - no retry, deduplication, or cross-peer ordering guarantee is provided yet
 async fn handle_debate(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<DebateRequest>,
@@ -783,7 +918,8 @@ async fn handle_debate(
             "payload": { "topic": req.topic },
         });
         match encrypt_and_send(&state, &member.node_id, Some(project_id), &payload).await {
-            Ok(_) => {
+            Ok(handoff) => {
+                note_pending_stage(&state.responses, &request_id, None, handoff.stage()).await;
                 sent_to.push(member.node_id.clone());
                 request_ids.push(request_id);
             }
@@ -932,27 +1068,33 @@ async fn handle_publish(
     )
 }
 
-/// Poll for a response by request_id.
+/// Poll for a response or staged delivery outcome by request_id.
 async fn handle_poll_response(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Json<PollResponse> {
     let mut map = state.responses.lock().await;
     if let Some(pending) = map.get(&id) {
-        if let Some(ref resp) = pending.response {
-            let result = PollResponse {
-                ready: true,
-                from_node: pending.from_node.clone(),
-                response: Some(resp.clone()),
-            };
-            map.remove(&id); // clean up after reading
-            return Json(result);
+        let result = PollResponse {
+            ready: pending.response.is_some(),
+            terminal: pending.stage.is_terminal(),
+            stage: pending.stage.as_str().to_string(),
+            from_node: pending.from_node.clone(),
+            response: pending.response.clone(),
+            error: pending.error.clone(),
+        };
+        if pending.stage.is_terminal() {
+            map.remove(&id);
         }
+        return Json(result);
     }
     Json(PollResponse {
         ready: false,
+        terminal: false,
+        stage: "unknown".to_string(),
         from_node: None,
         response: None,
+        error: None,
     })
 }
 
@@ -1182,9 +1324,11 @@ mod tests {
             "payload": { "question": "What is this project about?" },
         });
 
-        encrypt_and_send(&state, "kd_peer", Some("proj_test"), &payload)
+        let handoff = encrypt_and_send(&state, "kd_peer", Some("proj_test"), &payload)
             .await
             .unwrap();
+
+        assert_eq!(handoff, DeliveryHandoff::Mailbox);
 
         let relayed = relayed.lock().await;
         assert_eq!(relayed.len(), 1);
@@ -1204,6 +1348,97 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
         assert_eq!(parsed["messageType"], "ask");
         assert_eq!(parsed["payload"]["question"], "What is this project about?");
+    }
+
+    #[tokio::test]
+    async fn store_delivery_event_updates_pending_stage_until_response_arrives() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![member("kd_sender"), member("kd_peer")],
+        })));
+
+        insert_pending(
+            state.as_ref(),
+            "req_test".to_string(),
+            "proj_test",
+            "ask",
+            "hello",
+            None,
+        )
+        .await;
+        note_pending_stage(
+            &state.responses,
+            "req_test",
+            None,
+            DeliveryHandoff::Direct.stage(),
+        )
+        .await;
+        store_delivery_event(
+            &state.responses,
+            "req_test",
+            "kd_peer",
+            "received_by_peer_daemon",
+            None,
+        )
+        .await;
+
+        let poll = handle_poll_response(State(state.clone()), Path("req_test".to_string())).await;
+        assert!(!poll.ready);
+        assert!(!poll.terminal);
+        assert_eq!(poll.stage, "received_by_peer_daemon");
+        assert_eq!(poll.from_node.as_deref(), Some("kd_peer"));
+
+        store_response(&state.responses, "req_test", "kd_peer", "done").await;
+        let poll = handle_poll_response(State(state.clone()), Path("req_test".to_string())).await;
+        assert!(poll.ready);
+        assert!(poll.terminal);
+        assert_eq!(poll.stage, "processed_by_peer_runtime");
+        assert_eq!(poll.response.as_deref(), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn store_delivery_event_reports_terminal_processing_failure() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let state = Arc::new(make_test_state(Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: Arc::new(Mutex::new(Vec::new())),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![member("kd_sender"), member("kd_peer")],
+        })));
+
+        insert_pending(
+            state.as_ref(),
+            "req_fail".to_string(),
+            "proj_test",
+            "ask",
+            "hello",
+            None,
+        )
+        .await;
+        store_delivery_event(
+            &state.responses,
+            "req_fail",
+            "kd_peer",
+            "processing_failed",
+            Some("runtime rejected request"),
+        )
+        .await;
+
+        let poll = handle_poll_response(State(state.clone()), Path("req_fail".to_string())).await;
+        assert!(!poll.ready);
+        assert!(poll.terminal);
+        assert_eq!(poll.stage, "processing_failed");
+        assert_eq!(poll.from_node.as_deref(), Some("kd_peer"));
+        assert_eq!(poll.error.as_deref(), Some("runtime rejected request"));
     }
 
     #[tokio::test]

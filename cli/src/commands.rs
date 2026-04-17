@@ -2014,8 +2014,13 @@ fn daemon_url() -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
-/// Poll the daemon for a response by request_id. Blocks until response or timeout.
-fn poll_response(request_id: &str, timeout_secs: u64) -> Option<(String, String)> {
+enum PolledOutcome {
+    Response { from: String, text: String },
+    Failure { from: Option<String>, error: String },
+}
+
+/// Poll the daemon for a staged delivery outcome by request_id. Blocks until terminal outcome or timeout.
+fn poll_response(request_id: &str, timeout_secs: u64) -> Option<PolledOutcome> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -2025,14 +2030,45 @@ fn poll_response(request_id: &str, timeout_secs: u64) -> Option<(String, String)
         });
     let url = format!("{}/response/{}", daemon_url(), request_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last_stage = String::new();
 
     while std::time::Instant::now() < deadline {
         if let Ok(resp) = client.get(&url).send() {
             if let Ok(val) = resp.json::<serde_json::Value>() {
+                let stage = val["stage"].as_str().unwrap_or("");
+                if !stage.is_empty() && stage != "unknown" && stage != last_stage {
+                    match stage {
+                        "handed_off_direct" => {
+                            eprintln!("  delivery stage: handed off over direct transport")
+                        }
+                        "handed_off_mailbox" => {
+                            eprintln!("  delivery stage: handed off through mailbox relay")
+                        }
+                        "received_by_peer_daemon" => {
+                            eprintln!("  delivery stage: peer daemon received the request")
+                        }
+                        "processing_failed" => {
+                            eprintln!("  delivery stage: peer reported processing failure")
+                        }
+                        "processed_by_peer_runtime" => {
+                            eprintln!("  delivery stage: peer runtime processed the request")
+                        }
+                        other => eprintln!("  delivery stage: {}", other),
+                    }
+                    last_stage = stage.to_string();
+                }
                 if val["ready"].as_bool() == Some(true) {
                     let from = val["from_node"].as_str().unwrap_or("?").to_string();
                     let text = val["response"].as_str().unwrap_or("").to_string();
-                    return Some((from, text));
+                    return Some(PolledOutcome::Response { from, text });
+                }
+                if val["terminal"].as_bool() == Some(true) {
+                    let from = val["from_node"].as_str().map(|v| v.to_string());
+                    let error = val["error"]
+                        .as_str()
+                        .unwrap_or("request failed without a reported error")
+                        .to_string();
+                    return Some(PolledOutcome::Failure { from, error });
                 }
             }
         }
@@ -2180,8 +2216,16 @@ pub fn cmd_ask(node_id: &str, question: &str, project_id: Option<&str>, new_sess
 
     eprintln!("Waiting for response from {}...", resolved_node_id);
     match poll_response(request_id, 120) {
-        Some((from, text)) => {
+        Some(PolledOutcome::Response { from, text }) => {
             println!("[Response from {}]\n{}", from, text);
+        }
+        Some(PolledOutcome::Failure { from, error }) => {
+            if let Some(from) = from {
+                eprintln!("Peer {} reported failure: {}", from, error);
+            } else {
+                eprintln!("Peer reported failure: {}", error);
+            }
+            std::process::exit(1);
         }
         None => {
             eprintln!("Timeout: no response received within 120 seconds");
@@ -2235,8 +2279,18 @@ pub fn cmd_debate(topic: &str, project_id: &str, new_session: bool) {
     eprintln!("Waiting for {} responses...", request_ids.len());
     for request_id in &request_ids {
         match poll_response(request_id, 120) {
-            Some((from, text)) => {
+            Some(PolledOutcome::Response { from, text }) => {
                 println!("\n[Response from {}]\n{}", from, text);
+            }
+            Some(PolledOutcome::Failure { from, error }) => {
+                if let Some(from) = from {
+                    eprintln!(
+                        "Peer {} reported failure for {}: {}",
+                        from, request_id, error
+                    );
+                } else {
+                    eprintln!("Peer reported failure for {}: {}", request_id, error);
+                }
             }
             None => {
                 eprintln!("Timeout waiting for response to {}", request_id);

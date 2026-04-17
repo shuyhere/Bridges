@@ -152,6 +152,72 @@ async fn encode_mailbox_blob(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn send_delivery_event(
+    transport: &Transport,
+    coord: &CoordClient,
+    from_node_id: &str,
+    my_x25519_priv: &[u8; 32],
+    target_node_id: &str,
+    project_id: &str,
+    request_id: &str,
+    stage: &str,
+    error: Option<&str>,
+) {
+    if request_id.is_empty() {
+        return;
+    }
+
+    let event = serde_json::json!({
+        "from": from_node_id,
+        "projectId": project_id,
+        "messageType": "delivery_event",
+        "requestId": request_id,
+        "payload": {
+            "stage": stage,
+            "error": error,
+        },
+    });
+    let event_bytes = serde_json::to_vec(&event).unwrap_or_default();
+    if let Err(send_err) = transport.send(target_node_id, &event_bytes).await {
+        eprintln!(
+            "  failed to send delivery event {} to {}: {}",
+            stage, target_node_id, send_err
+        );
+        let project_ref = if project_id.trim().is_empty() {
+            None
+        } else {
+            Some(project_id)
+        };
+        match encode_mailbox_blob(
+            coord,
+            from_node_id,
+            my_x25519_priv,
+            target_node_id,
+            project_ref,
+            &event_bytes,
+        )
+        .await
+        {
+            Ok(event_blob) => {
+                if let Err(relay_err) = coord
+                    .relay_message(target_node_id, &event_blob, project_ref)
+                    .await
+                {
+                    eprintln!(
+                        "  failed to relay delivery event {} to {}: {}",
+                        stage, target_node_id, relay_err
+                    );
+                }
+            }
+            Err(encode_err) => eprintln!(
+                "  failed to encrypt delivery event {} to {}: {}",
+                stage, target_node_id, encode_err
+            ),
+        }
+    }
+}
+
 async fn seed_transport_identities_from_projects<F, Fut>(
     transport: &Transport,
     my_node_id: &str,
@@ -438,6 +504,27 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                         continue;
                     }
 
+                    // Handle delivery events — update staged local outcomes for the CLI.
+                    if kind == "delivery_event" {
+                        let stage = payload["stage"].as_str().unwrap_or("");
+                        let error = payload["error"].as_str();
+                        if !request_id.is_empty() {
+                            local_api::store_delivery_event(
+                                &recv_responses,
+                                request_id,
+                                from,
+                                stage,
+                                error,
+                            )
+                            .await;
+                            println!(
+                                "  delivery event from {} for {} → {}",
+                                from, request_id, stage
+                            );
+                        }
+                        continue;
+                    }
+
                     // Handle response messages — store them for the CLI to poll
                     if kind == "response" {
                         let response_text = payload["message"].as_str().unwrap_or("");
@@ -464,6 +551,19 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                         }
                         continue;
                     }
+
+                    send_delivery_event(
+                        recv_transport.as_ref(),
+                        &recv_coord,
+                        &recv_node_id,
+                        &recv_x_priv,
+                        from,
+                        project_id,
+                        request_id,
+                        "received_by_peer_daemon",
+                        None,
+                    )
+                    .await;
 
                     match dispatch_inbound_message(
                         &recv_coord,
@@ -533,6 +633,18 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                                 "dispatch error for {} from {}: {}",
                                 kind, from, e
                             ));
+                            send_delivery_event(
+                                recv_transport.as_ref(),
+                                &recv_coord,
+                                &recv_node_id,
+                                &recv_x_priv,
+                                from,
+                                project_id,
+                                request_id,
+                                "processing_failed",
+                                Some(&e),
+                            )
+                            .await;
                             eprintln!("  dispatch error for {} from {}: {}", kind, from, e);
                         }
                     }
@@ -638,6 +750,27 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     continue;
                 }
 
+                // Handle delivery events.
+                if kind == "delivery_event" {
+                    let stage = payload["stage"].as_str().unwrap_or("");
+                    let error = payload["error"].as_str();
+                    if !request_id.is_empty() {
+                        local_api::store_delivery_event(
+                            &poll_responses,
+                            request_id,
+                            msg_from,
+                            stage,
+                            error,
+                        )
+                        .await;
+                        println!(
+                            "  mailbox delivery event from {} for {} → {}",
+                            msg_from, request_id, stage
+                        );
+                    }
+                    continue;
+                }
+
                 // Handle response
                 if kind == "response" {
                     let response_text = payload["message"].as_str().unwrap_or("");
@@ -657,6 +790,19 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     }
                     continue;
                 }
+
+                send_delivery_event(
+                    poll_transport.as_ref(),
+                    &poll_coord,
+                    &poll_node_id,
+                    &poll_x_priv,
+                    msg_from,
+                    _project_id,
+                    request_id,
+                    "received_by_peer_daemon",
+                    None,
+                )
+                .await;
 
                 match dispatch_inbound_message(
                     &poll_coord,
@@ -718,6 +864,18 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                             "mailbox dispatch error for {} from {}: {}",
                             kind, msg_from, e
                         ));
+                        send_delivery_event(
+                            poll_transport.as_ref(),
+                            &poll_coord,
+                            &poll_node_id,
+                            &poll_x_priv,
+                            msg_from,
+                            _project_id,
+                            request_id,
+                            "processing_failed",
+                            Some(&e),
+                        )
+                        .await;
                         eprintln!(
                             "  mailbox dispatch error for {} from {}: {}",
                             kind, msg_from, e

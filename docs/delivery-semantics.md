@@ -9,9 +9,9 @@ Bridges currently provides **best-effort encrypted delivery with explicit fallba
 Across all message types:
 - direct encrypted transport is attempted first when possible
 - if direct delivery cannot be established, Bridges falls back to coordination-server mailbox relay
-- success means a payload was handed to either direct transport or mailbox relay for a target peer
-- success does **not** mean the remote runtime has processed the message yet
-- Bridges currently does **not** provide application-level retries, acknowledgements, or deduplication
+- success always includes at least local handoff to either direct transport or mailbox relay for a target peer
+- request/response flows now also surface staged peer-side outcomes where available
+- Bridges still does **not** provide application-level retries or deduplication yet
 - Bridges currently does **not** guarantee total ordering across peers
 
 ## 1. `ask`
@@ -23,13 +23,17 @@ Current behavior:
 - local daemon creates a `requestId`
 - delivery success returns HTTP 200 from the local API plus that `requestId`
 - delivery failure returns HTTP 502 and removes the pending request
-- the eventual response is matched by `requestId`
-- pending responses are short-lived local state, not durable coordination state
+- the sender can now observe staged outcomes for that `requestId` via the local daemon:
+  - `handed_off_direct` or `handed_off_mailbox`
+  - `received_by_peer_daemon`
+  - `processed_by_peer_runtime` or `processing_failed`
+- the eventual successful response is still matched by `requestId`
+- pending request state remains short-lived local state, not durable coordination state
 
 Guarantees / non-guarantees:
-- no automatic retry if delivery fails
+- no automatic retry if delivery fails or processing times out
 - no dedupe if the caller repeats the request
-- no guarantee the peer runtime will answer even if transport delivery succeeded
+- a peer receipt event means the peer daemon accepted the request, not that the runtime completed it successfully
 
 ## 2. `debate`
 
@@ -37,6 +41,7 @@ Guarantees / non-guarantees:
 
 Current behavior:
 - one `requestId` per successfully delivered peer
+- each delivered `requestId` can now advance through staged outcomes like `ask`
 - if some peers receive the debate and some do not, the local API returns:
   - HTTP 200
   - `ok=false`
@@ -46,9 +51,9 @@ Current behavior:
 
 Guarantees / non-guarantees:
 - no cross-peer ordering guarantee
-- no retry for failed peers
-- no dedupe across repeated debate submissions
-- each peer response is independent and may arrive in any order
+- no retry for failed peers yet
+- no dedupe across repeated debate submissions yet
+- each peer response and failure outcome is independent and may arrive in any order
 
 ## 3. `broadcast`
 
@@ -111,7 +116,7 @@ Callers should therefore use:
 Bridges does **not** currently promise:
 - exactly-once delivery
 - at-least-once delivery after remote runtime processing
-- end-to-end acknowledgements for broadcast/publish
+- end-to-end acknowledgements for `broadcast` / `publish`
 - automatic retry/backoff policy
 - delivery deduplication
 - causal or total ordering across peers
