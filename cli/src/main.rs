@@ -593,9 +593,36 @@ fn cmd_status(node_id: &str, verifying_key: &ed25519_dalek::VerifyingKey) {
 
     // Show client config if available.
     match client_config::ClientConfig::load() {
-        Ok(Some(cfg)) => {
+        Ok(Some(cfg)) if !cfg.api_key.trim().is_empty() => {
             println!("  coordination: {}", cfg.coordination);
             println!("  registered:   yes");
+            match commands::fetch_remote_identity_status(&cfg) {
+                Ok(remote) => {
+                    if remote.node_id != cfg.node_id {
+                        println!(
+                            "  lifecycle:    config mismatch (local={} remote={})",
+                            cfg.node_id, remote.node_id
+                        );
+                    } else if let Some(revoked_at) = remote.revoked_at.as_deref() {
+                        println!("  lifecycle:    revoked at {}", revoked_at);
+                        if let Some(reason) = remote.revocation_reason.as_deref() {
+                            println!("  revoke reason: {}", reason);
+                        }
+                        if let Some(replacement) = remote.replacement_node_id.as_deref() {
+                            println!("  replacement:  {}", replacement);
+                        }
+                    } else {
+                        println!("  lifecycle:    active");
+                    }
+                }
+                Err(err) => {
+                    println!("  lifecycle:    error ({})", err);
+                }
+            }
+        }
+        Ok(Some(_)) => {
+            println!("  registered:   no");
+            println!("  lifecycle:    local API key is empty (node likely revoked or not fully configured)");
         }
         Ok(None) => {
             println!("  registered:   no");

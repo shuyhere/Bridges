@@ -45,6 +45,7 @@ This now:
 - Saves config to `~/.bridges/config.json`
 - Installs the daemon service when supported and verifies daemon health
 - Prints skill-install guidance for the selected runtime
+- Works with the current node replacement / revocation lifecycle described below
 
 ### Step 3: Verify
 
@@ -180,6 +181,7 @@ bridges setup --coordination <URL> --runtime claude-code --name <display_name>
 bridges setup --coordination <URL> --runtime codex --name <display_name>
 
 bridges status
+bridges identity status
 bridges service status
 ```
 
@@ -217,8 +219,25 @@ Behavior:
 - `ask`, `debate`, `broadcast`, and `publish` will try to start the installed service if the daemon is not already running
 - if no service is installed, Bridges falls back to the old direct auto-spawn behavior
 - when diagnosing a local daemon problem, check the service first with `bridges service status`
-- `bridges doctor` is the current CLI diagnostics entry point for daemon, coordination, runtime, project, and peer checks
+- `bridges doctor` is the current CLI diagnostics entry point for daemon, coordination, runtime, project, peer, and identity-lifecycle checks
 - if the service is missing or not installed, install it yourself with `bridges service install` before asking the user to debug further
+
+### Identity lifecycle
+
+```bash
+bridges identity status
+bridges identity rotate
+bridges identity revoke --reason "compromised"
+```
+
+Current contract:
+
+- Bridges node IDs are derived from the Ed25519 identity key
+- a real key change therefore implies a new `kd_...` node ID
+- V1 rotation is implemented as node replacement + revocation
+- `bridges identity rotate` creates a fresh node, migrates memberships, revokes the old node, and updates local config
+- revoked nodes stop authenticating and are hidden from key/endpoint lookup
+- after any rotation or revocation, run `bridges doctor`
 
 ### Projects
 

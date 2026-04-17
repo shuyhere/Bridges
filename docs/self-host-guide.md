@@ -108,6 +108,7 @@ Verify:
 
 ```bash
 bridges status
+bridges identity status
 ```
 
 Save each user's node ID.
@@ -128,6 +129,15 @@ If service installation was not supported or failed:
 ```bash
 bridges daemon
 ```
+
+If you replace a machine or suspect a node compromise later, use:
+
+```bash
+bridges identity rotate
+bridges identity revoke --reason "compromised"
+```
+
+See `docs/identity-lifecycle.md` for the current replacement/revocation contract.
 
 ---
 

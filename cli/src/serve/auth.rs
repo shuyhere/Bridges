@@ -76,6 +76,8 @@ pub struct LifecycleResp {
     pub node_id: String,
     #[serde(rename = "revokedAt")]
     pub revoked_at: Option<String>,
+    #[serde(rename = "revocationReason")]
+    pub revocation_reason: Option<String>,
     #[serde(rename = "replacementNodeId")]
     pub replacement_node_id: Option<String>,
 }
@@ -235,13 +237,14 @@ async fn me(
         .open_connection()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     db.query_row(
-        "SELECT node_id, revoked_at, replacement_node_id FROM registered_nodes WHERE node_id = ?1",
+        "SELECT node_id, revoked_at, revocation_reason, replacement_node_id FROM registered_nodes WHERE node_id = ?1",
         rusqlite::params![auth.0],
         |row| {
             Ok(LifecycleResp {
                 node_id: row.get(0)?,
                 revoked_at: row.get(1)?,
-                replacement_node_id: row.get(2)?,
+                revocation_reason: row.get(2)?,
+                replacement_node_id: row.get(3)?,
             })
         },
     )
@@ -315,6 +318,7 @@ async fn revoke(
     Ok(Json(LifecycleResp {
         node_id: auth.0,
         revoked_at: Some(revoked_at),
+        revocation_reason: reason,
         replacement_node_id,
     }))
 }
@@ -351,6 +355,28 @@ async fn replace(
         .is_some();
     if !replacement_exists {
         return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let replacement_membership_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM server_members WHERE node_id = ?1",
+            rusqlite::params![req.new_node_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if replacement_membership_count > 0 {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let replacement_project_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM server_projects WHERE created_by = ?1",
+            rusqlite::params![req.new_node_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if replacement_project_count > 0 {
+        return Err(StatusCode::CONFLICT);
     }
 
     let migrated_project_count: i64 = tx
@@ -626,11 +652,50 @@ mod tests {
             response.replacement_node_id.as_deref(),
             Some(replacement_registered.node_id.as_str())
         );
+        assert_eq!(response.revocation_reason.as_deref(), Some("compromised"));
         assert!(
             extract_node_id(&state, &auth_headers(&old_registered.api_key))
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn replace_rejects_replacement_node_with_existing_memberships() {
+        let state = test_state();
+        let old = SigningKey::generate(&mut OsRng);
+        let old_registered = register(State(state.clone()), Json(register_req_from_signing(&old)))
+            .await
+            .unwrap()
+            .0;
+        let replacement = SigningKey::generate(&mut OsRng);
+        let replacement_registered = register(
+            State(state.clone()),
+            Json(register_req_from_signing(&replacement)),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        seed_project_membership(
+            &state,
+            "proj_replacement_busy",
+            &replacement_registered.node_id,
+            "member",
+        );
+
+        let result = replace(
+            State(state.clone()),
+            Extension(AuthNode(old_registered.node_id.clone())),
+            Json(ReplaceReq {
+                new_node_id: replacement_registered.node_id.clone(),
+                new_api_key: replacement_registered.api_key.clone(),
+                reason: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

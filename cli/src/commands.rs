@@ -1197,14 +1197,16 @@ pub fn cmd_members(project_id: &str) {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct RemoteIdentityStatus {
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct RemoteIdentityStatus {
     #[serde(rename = "nodeId")]
-    node_id: String,
+    pub(crate) node_id: String,
     #[serde(rename = "revokedAt")]
-    revoked_at: Option<String>,
+    pub(crate) revoked_at: Option<String>,
+    #[serde(rename = "revocationReason")]
+    pub(crate) revocation_reason: Option<String>,
     #[serde(rename = "replacementNodeId")]
-    replacement_node_id: Option<String>,
+    pub(crate) replacement_node_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1217,16 +1219,73 @@ struct RemoteReplaceResp {
     migrated_project_count: i64,
 }
 
+pub(crate) fn fetch_remote_identity_status(
+    cfg: &ClientConfig,
+) -> Result<RemoteIdentityStatus, String> {
+    let client = authed_client(cfg);
+    let url = format!("{}/v1/auth/me", cfg.coordination);
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|err| format!("identity status request failed: {}", err))?;
+    if !resp.status().is_success() {
+        return Err(format!("identity status returned HTTP {}", resp.status()));
+    }
+    resp.json::<RemoteIdentityStatus>()
+        .map_err(|err| format!("failed to parse identity status response: {}", err))
+}
+
+fn doctor_identity_check(cfg: &ClientConfig, remote: &RemoteIdentityStatus) -> DoctorCheck {
+    if remote.node_id != cfg.node_id {
+        return DoctorCheck::error(
+            "identity lifecycle",
+            format!(
+                "local config node {} does not match coordination node {}",
+                cfg.node_id, remote.node_id
+            ),
+            vec![
+                "This usually means local identity/config drift after a rotation or partial restore."
+                    .to_string(),
+                "Run `bridges identity status` and re-run setup or rotation recovery before sending messages."
+                    .to_string(),
+            ],
+        );
+    }
+
+    if let Some(revoked_at) = remote.revoked_at.as_deref() {
+        let mut hints = vec![
+            format!("This node was revoked at {}.", revoked_at),
+            "Run `bridges identity rotate` or `bridges setup --coordination <URL>` to establish a new active node."
+                .to_string(),
+        ];
+        if let Some(replacement) = remote.replacement_node_id.as_deref() {
+            hints.push(format!(
+                "Replacement node recorded by coordination: {}",
+                replacement
+            ));
+        }
+        if let Some(reason) = remote.revocation_reason.as_deref() {
+            hints.push(format!("Revocation reason: {}", reason));
+        }
+        return DoctorCheck::error(
+            "identity lifecycle",
+            format!("coordination reports node {} as revoked", remote.node_id),
+            hints,
+        );
+    }
+
+    DoctorCheck::ok(
+        "identity lifecycle",
+        format!("coordination reports node {} as active", remote.node_id),
+    )
+}
+
 pub fn cmd_identity_status() {
     let cfg = ClientConfig::load_or_exit();
-    let client = authed_client(&cfg);
-    let url = format!("{}/v1/auth/me", cfg.coordination);
-    let resp = send_or_exit(&client, &url, None, "GET");
-    if !resp.status().is_success() {
-        eprintln!("Identity status failed: HTTP {}", resp.status());
+    let remote = fetch_remote_identity_status(&cfg).unwrap_or_else(|err| {
+        eprintln!("Identity status failed: {}", err);
         std::process::exit(1);
-    }
-    let remote: RemoteIdentityStatus = parse_json_or_exit(resp);
+    });
 
     println!("Current identity:");
     println!("  local node:      {}", cfg.node_id);
@@ -1238,7 +1297,11 @@ pub fn cmd_identity_status() {
     );
     match remote.revoked_at.as_deref() {
         Some(revoked_at) => {
+            println!("  lifecycle state: revoked");
             println!("  revoked at:      {}", revoked_at);
+            if let Some(reason) = remote.revocation_reason.as_deref() {
+                println!("  revoke reason:   {}", reason);
+            }
             if let Some(replacement) = remote.replacement_node_id.as_deref() {
                 println!("  replacement:     {}", replacement);
             }
@@ -1692,12 +1755,25 @@ pub fn cmd_doctor(project_id: Option<&str>, peer_selector: Option<&str>) {
     }
 
     let client_cfg = match ClientConfig::load() {
-        Ok(Some(cfg)) => {
+        Ok(Some(cfg)) if !cfg.api_key.trim().is_empty() => {
             checks.push(DoctorCheck::ok(
                 "client config",
                 format!("registered as {} against {}", cfg.node_id, cfg.coordination),
             ));
             Some(cfg)
+        }
+        Ok(Some(cfg)) => {
+            checks.push(DoctorCheck::error(
+                "client config",
+                format!("client config for {} is present but the API key is empty", cfg.node_id),
+                vec![
+                    "This usually means the local node was revoked or a rotation was only partially completed."
+                        .to_string(),
+                    "Run `bridges identity status`, `bridges identity rotate`, or `bridges setup --coordination <URL>`."
+                        .to_string(),
+                ],
+            ));
+            None
         }
         Ok(None) => {
             checks.push(DoctorCheck::error(
@@ -1724,6 +1800,22 @@ pub fn cmd_doctor(project_id: Option<&str>, peer_selector: Option<&str>) {
     };
 
     checks.push(doctor_service_check());
+
+    if let Some(cfg) = client_cfg.as_ref() {
+        match fetch_remote_identity_status(cfg) {
+            Ok(remote) => checks.push(doctor_identity_check(cfg, &remote)),
+            Err(err) => checks.push(DoctorCheck::error(
+                "identity lifecycle",
+                format!("failed to query coordination identity status: {}", err),
+                vec![
+                    "This can happen if the local API key was revoked or local config no longer matches coordination state."
+                        .to_string(),
+                    "Run `bridges identity status` or re-run setup if the node should still be active."
+                        .to_string(),
+                ],
+            )),
+        }
+    }
 
     let daemon_status_url = format!("http://127.0.0.1:{}/status", daemon_cfg.local_api_port);
     let daemon_status = match client.get(&daemon_status_url).send() {
@@ -2325,6 +2417,28 @@ mod tests {
     fn resolve_join_invite_requires_project_for_raw_token() {
         let err = resolve_join_invite("bridges_inv_test", None).unwrap_err();
         assert!(err.contains("raw invite tokens still require --project"));
+    }
+
+    #[test]
+    fn doctor_identity_check_reports_revoked_node_as_error() {
+        let cfg = ClientConfig {
+            coordination: "http://127.0.0.1:17080".to_string(),
+            node_id: "kd_old".to_string(),
+            api_key: "bridges_sk_test".to_string(),
+            display_name: Some("node".to_string()),
+            owner: None,
+        };
+        let remote = RemoteIdentityStatus {
+            node_id: "kd_old".to_string(),
+            revoked_at: Some("2026-04-17T00:00:00Z".to_string()),
+            revocation_reason: Some("compromised".to_string()),
+            replacement_node_id: Some("kd_new".to_string()),
+        };
+
+        let check = doctor_identity_check(&cfg, &remote);
+        assert_eq!(check.level, DoctorLevel::Error);
+        assert!(check.summary.contains("revoked"));
+        assert!(check.hints.iter().any(|hint| hint.contains("kd_new")));
     }
 
     #[test]

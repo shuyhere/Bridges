@@ -178,6 +178,7 @@ See `docs/privacy-model.md` for the current privacy contract, retention model, a
 See `docs/presence-model.md` for the current daemon/runtime/reachability status model.
 See `docs/permissions-model.md` for the current project role and capability model.
 See `docs/addressing-model.md` for the current human-friendly peer selector rules.
+See `docs/identity-lifecycle.md` for the current key rotation, replacement, and revocation model.
 
 Before publishing or deploying, verify that you do **not** commit:
 
@@ -201,6 +202,7 @@ This repository currently ignores common local-sensitive paths such as:
 - `docs/permissions-model.md` — current project roles, capabilities, and enforcement boundaries
 - `docs/addressing-model.md` — current human-friendly selector resolution rules for CLI and skills
 - `docs/delivery-semantics.md` — current guarantees and non-guarantees for ask, debate, broadcast, and publish
+- `docs/identity-lifecycle.md` — current node replacement, revocation, and recovery model
 - `docs/self-host-guide.md` — full self-hosted server + agent runtime setup guide
 - `docs/mac-pi-setup-guide.md` — source-first setup guide for a Mac with Pi Agent
 - `docs/test-guide.md` — self-hosted/local coordination walkthrough
