@@ -36,8 +36,24 @@ impl DeliveryStage {
         }
     }
 
+    fn ordinal(self) -> u8 {
+        match self {
+            Self::PendingSend => 0,
+            Self::HandedOffDirect | Self::HandedOffMailbox => 1,
+            Self::ReceivedByPeerDaemon => 2,
+            Self::ProcessingFailed | Self::ProcessedByPeerRuntime => 3,
+        }
+    }
+
     fn is_terminal(self) -> bool {
         matches!(self, Self::ProcessingFailed | Self::ProcessedByPeerRuntime)
+    }
+
+    fn has_peer_receipt(self) -> bool {
+        matches!(
+            self,
+            Self::ReceivedByPeerDaemon | Self::ProcessingFailed | Self::ProcessedByPeerRuntime
+        )
     }
 
     fn from_str(value: &str) -> Option<Self> {
@@ -415,11 +431,21 @@ async fn note_pending_stage(
         if pending.stage.is_terminal() {
             return;
         }
-        pending.stage = stage;
+        if stage.ordinal() >= pending.stage.ordinal() {
+            pending.stage = stage;
+        }
         if let Some(from_node) = from_node {
             pending.from_node = Some(from_node.to_string());
         }
     }
+}
+
+async fn get_pending_stage(
+    responses: &Arc<Mutex<HashMap<String, PendingResponse>>>,
+    request_id: &str,
+) -> Option<DeliveryStage> {
+    let map = responses.lock().await;
+    map.get(request_id).map(|pending| pending.stage)
 }
 
 async fn note_pending_failure(
@@ -444,6 +470,33 @@ async fn note_pending_failure(
 async fn remove_pending(state: &ApiState, request_id: &str) {
     let mut responses = state.responses.lock().await;
     responses.remove(request_id);
+}
+
+async fn retry_request_until_peer_receipt(
+    state: Arc<ApiState>,
+    request_id: String,
+    peer_id: String,
+    project_id: Option<String>,
+    payload: serde_json::Value,
+    delays: &[std::time::Duration],
+) {
+    for delay in delays {
+        tokio::time::sleep(*delay).await;
+        let Some(stage) = get_pending_stage(&state.responses, &request_id).await else {
+            return;
+        };
+        if stage.has_peer_receipt() || stage.is_terminal() {
+            return;
+        }
+        match encrypt_and_send(&state, &peer_id, project_id.as_deref(), &payload).await {
+            Ok(handoff) => {
+                note_pending_stage(&state.responses, &request_id, None, handoff.stage()).await;
+            }
+            Err(err) => {
+                eprintln!("  retry for {} failed: {}", request_id, err);
+            }
+        }
+    }
 }
 
 fn require_non_empty(value: &str, field: &str) -> Result<(), String> {
@@ -688,6 +741,25 @@ async fn handle_ask(
     match encrypt_and_send(&state, node_id, project_ref, &payload).await {
         Ok(handoff) => {
             note_pending_stage(&state.responses, &request_id, None, handoff.stage()).await;
+            let retry_state = state.clone();
+            let retry_request_id = request_id.clone();
+            let retry_peer_id = node_id.to_string();
+            let retry_project_id = project_ref.map(str::to_string);
+            let retry_payload = payload.clone();
+            tokio::spawn(async move {
+                retry_request_until_peer_receipt(
+                    retry_state,
+                    retry_request_id,
+                    retry_peer_id,
+                    retry_project_id,
+                    retry_payload,
+                    &[
+                        std::time::Duration::from_secs(1),
+                        std::time::Duration::from_secs(2),
+                    ],
+                )
+                .await;
+            });
             (
                 StatusCode::OK,
                 Json(SendResponse {
@@ -1439,6 +1511,110 @@ mod tests {
         assert_eq!(poll.stage, "processing_failed");
         assert_eq!(poll.from_node.as_deref(), Some("kd_peer"));
         assert_eq!(poll.error.as_deref(), Some("runtime rejected request"));
+    }
+
+    #[tokio::test]
+    async fn retry_request_until_peer_receipt_retries_without_receipt() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let coord = Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: relayed.clone(),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![member("kd_sender"), member("kd_peer")],
+        });
+        let state = Arc::new(make_test_state(coord));
+
+        insert_pending(
+            state.as_ref(),
+            "req_retry".to_string(),
+            "proj_test",
+            "ask",
+            "hello",
+            None,
+        )
+        .await;
+        note_pending_stage(
+            &state.responses,
+            "req_retry",
+            None,
+            DeliveryHandoff::Mailbox.stage(),
+        )
+        .await;
+
+        let payload = serde_json::json!({
+            "from": "kd_sender",
+            "projectId": "proj_test",
+            "messageType": "ask",
+            "requestId": "req_retry",
+            "payload": { "question": "hello" },
+        });
+        retry_request_until_peer_receipt(
+            state.clone(),
+            "req_retry".to_string(),
+            "kd_peer".to_string(),
+            Some("proj_test".to_string()),
+            payload,
+            &[std::time::Duration::from_millis(10)],
+        )
+        .await;
+
+        assert_eq!(relayed.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_request_until_peer_receipt_stops_after_receipt() {
+        let peer_signing = SigningKey::generate(&mut OsRng);
+        let peer_x25519 =
+            crypto::ed25519_to_x25519_public(peer_signing.verifying_key().as_bytes()).unwrap();
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let coord = Arc::new(MockCoord {
+            peer_x25519_pub: hex::encode(peer_x25519),
+            relayed: relayed.clone(),
+            relay_error: None,
+            relay_errors_by_target: std::collections::HashMap::new(),
+            project_members: vec![member("kd_sender"), member("kd_peer")],
+        });
+        let state = Arc::new(make_test_state(coord));
+
+        insert_pending(
+            state.as_ref(),
+            "req_retry_stop".to_string(),
+            "proj_test",
+            "ask",
+            "hello",
+            None,
+        )
+        .await;
+        note_pending_stage(
+            &state.responses,
+            "req_retry_stop",
+            None,
+            DeliveryStage::ReceivedByPeerDaemon,
+        )
+        .await;
+
+        let payload = serde_json::json!({
+            "from": "kd_sender",
+            "projectId": "proj_test",
+            "messageType": "ask",
+            "requestId": "req_retry_stop",
+            "payload": { "question": "hello" },
+        });
+        retry_request_until_peer_receipt(
+            state.clone(),
+            "req_retry_stop".to_string(),
+            "kd_peer".to_string(),
+            Some("proj_test".to_string()),
+            payload,
+            &[std::time::Duration::from_millis(10)],
+        )
+        .await;
+
+        assert!(relayed.lock().await.is_empty());
     }
 
     #[tokio::test]

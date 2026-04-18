@@ -31,8 +31,10 @@ Current behavior:
 - pending request state remains short-lived local state, not durable coordination state
 
 Guarantees / non-guarantees:
-- no automatic retry if delivery fails or processing times out
-- no dedupe if the caller repeats the request
+- Bridges now performs a small bounded retry for `ask` when no peer receipt event arrives yet, reusing the same `requestId`
+- receiver-side request dedupe prevents those retries from re-running runtime dispatch after a request is already in flight or completed
+- no unbounded retry if delivery fails or processing times out
+- no dedupe if the caller submits a brand-new request with a different `requestId`
 - a peer receipt event means the peer daemon accepted the request, not that the runtime completed it successfully
 
 ## 2. `debate`
@@ -51,8 +53,9 @@ Current behavior:
 
 Guarantees / non-guarantees:
 - no cross-peer ordering guarantee
-- no retry for failed peers yet
-- no dedupe across repeated debate submissions yet
+- no automatic retry for failed peers yet
+- debate request IDs are now also safe to dedupe/replay on the receiver if the same request ID is seen again
+- no dedupe across brand-new repeated debate submissions with new request IDs
 - each peer response and failure outcome is independent and may arrive in any order
 
 ## 3. `broadcast`
@@ -117,8 +120,8 @@ Bridges does **not** currently promise:
 - exactly-once delivery
 - at-least-once delivery after remote runtime processing
 - end-to-end acknowledgements for `broadcast` / `publish`
-- automatic retry/backoff policy
-- delivery deduplication
+- a general retry/backoff policy beyond the current small `ask` retry
+- delivery deduplication across all message classes
 - causal or total ordering across peers
 
 ## 8. Test expectations

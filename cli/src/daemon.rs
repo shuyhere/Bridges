@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::config::DaemonConfig;
@@ -216,6 +217,141 @@ async fn send_delivery_event(
             ),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_response_message(
+    transport: &Transport,
+    coord: &CoordClient,
+    from_node_id: &str,
+    my_x25519_priv: &[u8; 32],
+    target_node_id: &str,
+    project_id: &str,
+    request_id: &str,
+    response: &str,
+) {
+    let reply = serde_json::json!({
+        "from": from_node_id,
+        "projectId": project_id,
+        "messageType": "response",
+        "requestId": request_id,
+        "payload": { "message": response },
+    });
+    let reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
+    if let Err(e) = transport.send(target_node_id, &reply_bytes).await {
+        eprintln!("  failed to send reply to {}: {}", target_node_id, e);
+        let project_ref = if project_id.trim().is_empty() {
+            None
+        } else {
+            Some(project_id)
+        };
+        match encode_mailbox_blob(
+            coord,
+            from_node_id,
+            my_x25519_priv,
+            target_node_id,
+            project_ref,
+            &reply_bytes,
+        )
+        .await
+        {
+            Ok(reply_blob) => {
+                if let Err(relay_err) = coord
+                    .relay_message(target_node_id, &reply_blob, project_ref)
+                    .await
+                {
+                    eprintln!(
+                        "  failed to relay reply to {}: {}",
+                        target_node_id, relay_err
+                    );
+                }
+            }
+            Err(encode_err) => eprintln!(
+                "  failed to encrypt relay reply to {}: {}",
+                target_node_id, encode_err
+            ),
+        }
+    }
+}
+
+const REQUEST_CACHE_TTL_SECS: u64 = 300;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CachedRequestOutcome {
+    InFlight,
+    Succeeded(String),
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+struct CachedRequestEntry {
+    outcome: CachedRequestOutcome,
+    updated_at: Instant,
+}
+
+fn prune_request_cache(cache: &mut HashMap<String, CachedRequestEntry>) {
+    cache.retain(|_, entry| entry.updated_at.elapsed().as_secs() < REQUEST_CACHE_TTL_SECS);
+}
+
+async fn begin_request_processing(
+    cache: &Arc<Mutex<HashMap<String, CachedRequestEntry>>>,
+    request_id: &str,
+) -> Option<CachedRequestOutcome> {
+    if request_id.is_empty() {
+        return None;
+    }
+    let mut cache = cache.lock().await;
+    prune_request_cache(&mut cache);
+    if let Some(existing) = cache.get_mut(request_id) {
+        existing.updated_at = Instant::now();
+        return Some(existing.outcome.clone());
+    }
+    cache.insert(
+        request_id.to_string(),
+        CachedRequestEntry {
+            outcome: CachedRequestOutcome::InFlight,
+            updated_at: Instant::now(),
+        },
+    );
+    None
+}
+
+async fn finish_request_success(
+    cache: &Arc<Mutex<HashMap<String, CachedRequestEntry>>>,
+    request_id: &str,
+    response: &str,
+) {
+    if request_id.is_empty() {
+        return;
+    }
+    let mut cache = cache.lock().await;
+    prune_request_cache(&mut cache);
+    cache.insert(
+        request_id.to_string(),
+        CachedRequestEntry {
+            outcome: CachedRequestOutcome::Succeeded(response.to_string()),
+            updated_at: Instant::now(),
+        },
+    );
+}
+
+async fn finish_request_failure(
+    cache: &Arc<Mutex<HashMap<String, CachedRequestEntry>>>,
+    request_id: &str,
+    error: &str,
+) {
+    if request_id.is_empty() {
+        return;
+    }
+    let mut cache = cache.lock().await;
+    prune_request_cache(&mut cache);
+    cache.insert(
+        request_id.to_string(),
+        CachedRequestEntry {
+            outcome: CachedRequestOutcome::Failed(error.to_string()),
+            updated_at: Instant::now(),
+        },
+    );
 }
 
 async fn seed_transport_identities_from_projects<F, Fut>(
@@ -441,6 +577,8 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     // Shared response store (read by CLI via /response/:id endpoint)
     let responses: Arc<Mutex<HashMap<String, local_api::PendingResponse>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let request_cache: Arc<Mutex<HashMap<String, CachedRequestEntry>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Local API state
     let api_state = Arc::new(local_api::ApiState {
@@ -475,6 +613,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let recv_coord = coord.clone();
     let recv_x_priv = x_priv;
     let recv_presence = presence.clone();
+    let recv_request_cache = request_cache.clone();
     let recv_handle = tokio::spawn(async move {
         loop {
             match recv_transport.recv().await {
@@ -552,6 +691,55 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                         continue;
                     }
 
+                    if let Some(cached) =
+                        begin_request_processing(&recv_request_cache, request_id).await
+                    {
+                        send_delivery_event(
+                            recv_transport.as_ref(),
+                            &recv_coord,
+                            &recv_node_id,
+                            &recv_x_priv,
+                            from,
+                            project_id,
+                            request_id,
+                            "received_by_peer_daemon",
+                            None,
+                        )
+                        .await;
+                        match cached {
+                            CachedRequestOutcome::InFlight => continue,
+                            CachedRequestOutcome::Succeeded(response) => {
+                                send_response_message(
+                                    recv_transport.as_ref(),
+                                    &recv_coord,
+                                    &recv_node_id,
+                                    &recv_x_priv,
+                                    from,
+                                    project_id,
+                                    request_id,
+                                    &response,
+                                )
+                                .await;
+                                continue;
+                            }
+                            CachedRequestOutcome::Failed(error) => {
+                                send_delivery_event(
+                                    recv_transport.as_ref(),
+                                    &recv_coord,
+                                    &recv_node_id,
+                                    &recv_x_priv,
+                                    from,
+                                    project_id,
+                                    request_id,
+                                    "processing_failed",
+                                    Some(&error),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                    }
+
                     send_delivery_event(
                         recv_transport.as_ref(),
                         &recv_coord,
@@ -589,50 +777,27 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                                 from,
                                 response.len()
                             );
+                            finish_request_success(&recv_request_cache, request_id, &response)
+                                .await;
                             // Send encrypted response back, include requestId so sender can match it
-                            let reply = serde_json::json!({
-                                "from": recv_node_id,
-                                "projectId": project_id,
-                                "messageType": "response",
-                                "requestId": request_id,
-                                "payload": { "message": response },
-                            });
-                            let reply_bytes = serde_json::to_vec(&reply).unwrap_or_default();
-                            if let Err(e) = recv_transport.send(from, &reply_bytes).await {
-                                eprintln!("  failed to send reply to {}: {}", from, e);
-                                match encode_mailbox_blob(
-                                    &recv_coord,
-                                    &recv_node_id,
-                                    &recv_x_priv,
-                                    from,
-                                    Some(project_id),
-                                    &reply_bytes,
-                                )
-                                .await
-                                {
-                                    Ok(reply_blob) => {
-                                        if let Err(relay_err) = recv_coord
-                                            .relay_message(from, &reply_blob, Some(project_id))
-                                            .await
-                                        {
-                                            eprintln!(
-                                                "  failed to relay reply to {}: {}",
-                                                from, relay_err
-                                            );
-                                        }
-                                    }
-                                    Err(encode_err) => eprintln!(
-                                        "  failed to encrypt relay reply to {}: {}",
-                                        from, encode_err
-                                    ),
-                                }
-                            }
+                            send_response_message(
+                                recv_transport.as_ref(),
+                                &recv_coord,
+                                &recv_node_id,
+                                &recv_x_priv,
+                                from,
+                                project_id,
+                                request_id,
+                                &response,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             recv_presence.lock().await.note_runtime_error(format!(
                                 "dispatch error for {} from {}: {}",
                                 kind, from, e
                             ));
+                            finish_request_failure(&recv_request_cache, request_id, &e).await;
                             send_delivery_event(
                                 recv_transport.as_ref(),
                                 &recv_coord,
@@ -667,6 +832,7 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
     let poll_x_priv = x_priv;
     let poll_presence = presence.clone();
     let poll_transport = transport.clone();
+    let poll_request_cache = request_cache.clone();
     let poll_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -791,6 +957,55 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                     continue;
                 }
 
+                if let Some(cached) =
+                    begin_request_processing(&poll_request_cache, request_id).await
+                {
+                    send_delivery_event(
+                        poll_transport.as_ref(),
+                        &poll_coord,
+                        &poll_node_id,
+                        &poll_x_priv,
+                        msg_from,
+                        _project_id,
+                        request_id,
+                        "received_by_peer_daemon",
+                        None,
+                    )
+                    .await;
+                    match cached {
+                        CachedRequestOutcome::InFlight => continue,
+                        CachedRequestOutcome::Succeeded(response) => {
+                            send_response_message(
+                                poll_transport.as_ref(),
+                                &poll_coord,
+                                &poll_node_id,
+                                &poll_x_priv,
+                                msg_from,
+                                _project_id,
+                                request_id,
+                                &response,
+                            )
+                            .await;
+                            continue;
+                        }
+                        CachedRequestOutcome::Failed(error) => {
+                            send_delivery_event(
+                                poll_transport.as_ref(),
+                                &poll_coord,
+                                &poll_node_id,
+                                &poll_x_priv,
+                                msg_from,
+                                _project_id,
+                                request_id,
+                                "processing_failed",
+                                Some(&error),
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                }
+
                 send_delivery_event(
                     poll_transport.as_ref(),
                     &poll_coord,
@@ -828,42 +1043,25 @@ pub async fn run(_foreground: bool) -> Result<(), String> {
                             msg_from,
                             response.len()
                         );
-                        // Send response back via relay
-                        let reply = serde_json::json!({
-                            "from": poll_node_id,
-                            "messageType": "response",
-                            "requestId": request_id,
-                            "payload": { "message": response },
-                        });
-                        match encode_mailbox_blob(
+                        finish_request_success(&poll_request_cache, request_id, &response).await;
+                        send_response_message(
+                            poll_transport.as_ref(),
                             &poll_coord,
                             &poll_node_id,
                             &poll_x_priv,
                             msg_from,
-                            Some(_project_id),
-                            &serde_json::to_vec(&reply).unwrap_or_default(),
+                            _project_id,
+                            request_id,
+                            &response,
                         )
-                        .await
-                        {
-                            Ok(reply_blob) => {
-                                if let Err(e) = poll_coord
-                                    .relay_message(msg_from, &reply_blob, Some(_project_id))
-                                    .await
-                                {
-                                    eprintln!("  failed to relay response to {}: {}", msg_from, e);
-                                }
-                            }
-                            Err(e) => eprintln!(
-                                "  failed to encrypt relay response to {}: {}",
-                                msg_from, e
-                            ),
-                        }
+                        .await;
                     }
                     Err(e) => {
                         poll_presence.lock().await.note_runtime_error(format!(
                             "mailbox dispatch error for {} from {}: {}",
                             kind, msg_from, e
                         ));
+                        finish_request_failure(&poll_request_cache, request_id, &e).await;
                         send_delivery_event(
                             poll_transport.as_ref(),
                             &poll_coord,
@@ -910,6 +1108,29 @@ mod tests {
         let signing = SigningKey::generate(&mut OsRng);
         let x_priv = crate::crypto::ed25519_to_x25519_private(&signing.to_bytes());
         Transport::new_for_tests(ConnManager::new(None), None, node_id.to_string(), x_priv)
+    }
+
+    #[tokio::test]
+    async fn request_cache_replays_terminal_outcome_without_reprocessing() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+
+        assert!(begin_request_processing(&cache, "req_1").await.is_none());
+        assert_eq!(
+            begin_request_processing(&cache, "req_1").await,
+            Some(CachedRequestOutcome::InFlight)
+        );
+
+        finish_request_success(&cache, "req_1", "done").await;
+        assert_eq!(
+            begin_request_processing(&cache, "req_1").await,
+            Some(CachedRequestOutcome::Succeeded("done".to_string()))
+        );
+
+        finish_request_failure(&cache, "req_2", "bad runtime").await;
+        assert_eq!(
+            begin_request_processing(&cache, "req_2").await,
+            Some(CachedRequestOutcome::Failed("bad runtime".to_string()))
+        );
     }
 
     #[tokio::test]
