@@ -210,6 +210,18 @@ pub struct PublishRequest {
     pub project_id: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerDeliveryResult {
+    pub peer_id: String,
+    pub delivered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BroadcastResponse {
     pub ok: bool,
@@ -217,6 +229,7 @@ pub struct BroadcastResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_ids: Option<Vec<String>>,
+    pub results: Vec<PeerDeliveryResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -787,6 +800,7 @@ async fn handle_ask(
 /// - fanout to all other project members
 /// - per-peer direct transport is attempted first, with mailbox relay fallback
 /// - partial success returns HTTP 200 with `ok=false` and the successfully delivered `sent_to` list
+/// - richer per-peer handoff results are returned in `results`
 /// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
 /// - no retry, deduplication, or global ordering guarantee is provided
 async fn handle_broadcast(
@@ -801,6 +815,7 @@ async fn handle_broadcast(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -812,6 +827,7 @@ async fn handle_broadcast(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -823,6 +839,7 @@ async fn handle_broadcast(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -838,6 +855,7 @@ async fn handle_broadcast(
                     sent_to: vec![],
                     error: Some(e),
                     request_ids: None,
+                    results: vec![],
                 }),
             )
         }
@@ -853,11 +871,13 @@ async fn handle_broadcast(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
 
     let mut sent_to = Vec::new();
+    let mut results = Vec::new();
     let mut last_err = None;
     for member in &members {
         if member.node_id == state.node_id {
@@ -870,8 +890,26 @@ async fn handle_broadcast(
             "payload": { "message": req.message },
         });
         match encrypt_and_send(&state, &member.node_id, Some(project_id), &payload).await {
-            Ok(_) => sent_to.push(member.node_id.clone()),
-            Err(e) => last_err = Some(e),
+            Ok(handoff) => {
+                sent_to.push(member.node_id.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: true,
+                    request_id: None,
+                    stage: Some(handoff.stage().as_str().to_string()),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                last_err = Some(e.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: false,
+                    request_id: None,
+                    stage: Some("send_failed".to_string()),
+                    error: Some(e),
+                });
+            }
         }
     }
 
@@ -888,6 +926,7 @@ async fn handle_broadcast(
             sent_to,
             error: last_err,
             request_ids: None,
+            results,
         }),
     )
 }
@@ -896,9 +935,10 @@ async fn handle_broadcast(
 /// - fanout request/response to all other project members
 /// - each successfully delivered peer gets its own `requestId`
 /// - each `requestId` can now advance through staged outcomes like `ask`
+/// - bounded retry is applied per peer until a receipt event is observed
+/// - richer per-peer handoff results are returned in `results`
 /// - partial success returns HTTP 200 with `ok=false`, plus only the `request_ids` that were actually sent
 /// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
-/// - no retry, deduplication, or cross-peer ordering guarantee is provided yet
 async fn handle_debate(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<DebateRequest>,
@@ -911,6 +951,7 @@ async fn handle_debate(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -922,6 +963,7 @@ async fn handle_debate(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -937,6 +979,7 @@ async fn handle_debate(
                     sent_to: vec![],
                     error: Some(e),
                     request_ids: None,
+                    results: vec![],
                 }),
             )
         }
@@ -951,12 +994,14 @@ async fn handle_debate(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
 
     let mut sent_to = Vec::new();
     let mut request_ids = Vec::new();
+    let mut results = Vec::new();
     let mut last_err = None;
     for member in &members {
         if member.node_id == state.node_id {
@@ -992,12 +1037,45 @@ async fn handle_debate(
         match encrypt_and_send(&state, &member.node_id, Some(project_id), &payload).await {
             Ok(handoff) => {
                 note_pending_stage(&state.responses, &request_id, None, handoff.stage()).await;
+                let retry_state = state.clone();
+                let retry_request_id = request_id.clone();
+                let retry_peer_id = member.node_id.clone();
+                let retry_payload = payload.clone();
+                let retry_project_id = Some(project_id.to_string());
+                tokio::spawn(async move {
+                    retry_request_until_peer_receipt(
+                        retry_state,
+                        retry_request_id,
+                        retry_peer_id,
+                        retry_project_id,
+                        retry_payload,
+                        &[
+                            std::time::Duration::from_secs(1),
+                            std::time::Duration::from_secs(2),
+                        ],
+                    )
+                    .await;
+                });
                 sent_to.push(member.node_id.clone());
-                request_ids.push(request_id);
+                request_ids.push(request_id.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: true,
+                    request_id: Some(request_id),
+                    stage: Some(handoff.stage().as_str().to_string()),
+                    error: None,
+                });
             }
             Err(e) => {
                 remove_pending(&state, &request_id).await;
-                last_err = Some(e);
+                last_err = Some(e.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: false,
+                    request_id: Some(request_id),
+                    stage: Some("send_failed".to_string()),
+                    error: Some(e),
+                });
             }
         }
     }
@@ -1015,6 +1093,7 @@ async fn handle_debate(
             sent_to,
             error: last_err,
             request_ids: Some(request_ids),
+            results,
         }),
     )
 }
@@ -1023,6 +1102,7 @@ async fn handle_debate(
 /// - fanout artifact delivery to all other project members
 /// - success means the payload was handed to direct transport or mailbox relay for that peer
 /// - partial success returns HTTP 200 with `ok=false` and the successfully delivered `sent_to` list
+/// - richer per-peer handoff results are returned in `results`
 /// - HTTP 502 is reserved for the case where nothing was delivered and an error occurred
 /// - no retry or deduplication is provided at this layer
 async fn handle_publish(
@@ -1039,6 +1119,7 @@ async fn handle_publish(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -1050,6 +1131,7 @@ async fn handle_publish(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -1061,6 +1143,7 @@ async fn handle_publish(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -1072,6 +1155,7 @@ async fn handle_publish(
                 sent_to: vec![],
                 error: Some(format!("data must be valid base64: {}", e)),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
@@ -1087,6 +1171,7 @@ async fn handle_publish(
                     sent_to: vec![],
                     error: Some(e),
                     request_ids: None,
+                    results: vec![],
                 }),
             )
         }
@@ -1101,11 +1186,13 @@ async fn handle_publish(
                 sent_to: vec![],
                 error: Some(e),
                 request_ids: None,
+                results: vec![],
             }),
         );
     }
 
     let mut sent_to = Vec::new();
+    let mut results = Vec::new();
     let mut last_err = None;
     for member in &members {
         if member.node_id == state.node_id {
@@ -1118,8 +1205,26 @@ async fn handle_publish(
             "payload": { "filename": req.filename, "data": req.data },
         });
         match encrypt_and_send(&state, &member.node_id, Some(project_id), &payload).await {
-            Ok(_) => sent_to.push(member.node_id.clone()),
-            Err(e) => last_err = Some(e),
+            Ok(handoff) => {
+                sent_to.push(member.node_id.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: true,
+                    request_id: None,
+                    stage: Some(handoff.stage().as_str().to_string()),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                last_err = Some(e.clone());
+                results.push(PeerDeliveryResult {
+                    peer_id: member.node_id.clone(),
+                    delivered: false,
+                    request_id: None,
+                    stage: Some("send_failed".to_string()),
+                    error: Some(e),
+                });
+            }
         }
     }
 
@@ -1136,6 +1241,7 @@ async fn handle_publish(
             sent_to,
             error: last_err,
             request_ids: None,
+            results,
         }),
     )
 }
@@ -1749,6 +1855,11 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["sent_to"], serde_json::json!(["kd_peer_a"]));
         assert_eq!(json["error"], "relay unavailable");
+        assert_eq!(json["results"].as_array().map(|v| v.len()), Some(2));
+        assert_eq!(json["results"][0]["peer_id"], "kd_peer_a");
+        assert_eq!(json["results"][0]["stage"], "handed_off_mailbox");
+        assert_eq!(json["results"][1]["peer_id"], "kd_peer_b");
+        assert_eq!(json["results"][1]["stage"], "send_failed");
     }
 
     #[tokio::test]
@@ -1826,6 +1937,12 @@ mod tests {
         assert_eq!(json["sent_to"], serde_json::json!(["kd_peer_a"]));
         assert_eq!(json["error"], "relay unavailable");
         assert_eq!(json["request_ids"].as_array().map(|v| v.len()), Some(1));
+        assert_eq!(json["results"].as_array().map(|v| v.len()), Some(2));
+        assert_eq!(json["results"][0]["peer_id"], "kd_peer_a");
+        assert_eq!(json["results"][0]["stage"], "handed_off_mailbox");
+        assert!(json["results"][0]["request_id"].as_str().is_some());
+        assert_eq!(json["results"][1]["peer_id"], "kd_peer_b");
+        assert_eq!(json["results"][1]["stage"], "send_failed");
         assert_eq!(state.responses.lock().await.len(), 1);
     }
 
@@ -1859,6 +1976,9 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["sent_to"], serde_json::json!([]));
         assert_eq!(json["error"], "relay unavailable");
+        assert_eq!(json["results"].as_array().map(|v| v.len()), Some(1));
+        assert_eq!(json["results"][0]["peer_id"], "kd_peer_a");
+        assert_eq!(json["results"][0]["stage"], "send_failed");
     }
 
     #[tokio::test]

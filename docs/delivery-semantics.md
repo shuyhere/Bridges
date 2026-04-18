@@ -11,7 +11,7 @@ Across all message types:
 - if direct delivery cannot be established, Bridges falls back to coordination-server mailbox relay
 - success always includes at least local handoff to either direct transport or mailbox relay for a target peer
 - request/response flows now also surface staged peer-side outcomes where available
-- Bridges still does **not** provide application-level retries or deduplication yet
+- Bridges currently keeps using the existing `requestId` as the correlation key for staged request/response outcomes and retries; a separate `deliveryId` has not been introduced yet
 - Bridges currently does **not** guarantee total ordering across peers
 
 ## 1. `ask`
@@ -42,19 +42,22 @@ Guarantees / non-guarantees:
 `debate` is a **fanout request/response** flow to all other project members.
 
 Current behavior:
-- one `requestId` per successfully delivered peer
+- one `requestId` per target peer
 - each delivered `requestId` can now advance through staged outcomes like `ask`
+- Bridges now performs a small bounded retry per debate peer when no peer receipt event arrives yet, reusing that peer's `requestId`
+- receiver-side request dedupe prevents those retries from re-running runtime dispatch after a debate request ID is already in flight or completed
 - if some peers receive the debate and some do not, the local API returns:
   - HTTP 200
   - `ok=false`
   - `sent_to` containing only successful peers
   - `request_ids` containing only successful request IDs
+  - `results` containing per-peer handoff/failure details
 - if no peers receive the debate and at least one delivery error occurs, the local API returns HTTP 502
 
 Guarantees / non-guarantees:
 - no cross-peer ordering guarantee
-- no automatic retry for failed peers yet
-- debate request IDs are now also safe to dedupe/replay on the receiver if the same request ID is seen again
+- no unbounded retry for failed peers
+- repeated debate retries with the same `requestId` are deduped/replayed on the receiver
 - no dedupe across brand-new repeated debate submissions with new request IDs
 - each peer response and failure outcome is independent and may arrive in any order
 
@@ -64,10 +67,12 @@ Guarantees / non-guarantees:
 
 Current behavior:
 - sender attempts delivery to each other project member independently
+- the local API now also returns `results` with per-peer handoff/failure details
 - if some peers receive the message and some do not, the local API returns:
   - HTTP 200
   - `ok=false`
   - `sent_to` containing only successful peers
+  - `results` containing per-peer handoff/failure details
 - if no peers receive the message and at least one delivery error occurs, the local API returns HTTP 502
 
 Guarantees / non-guarantees:
@@ -83,6 +88,7 @@ Guarantees / non-guarantees:
 Current behavior:
 - each recipient receives an encrypted payload containing the filename and base64 artifact data
 - success/failure semantics match `broadcast`
+- the local API now also returns `results` with per-peer handoff/failure details
 - partial success returns HTTP 200 with `ok=false` and a successful `sent_to` list
 - all-failed delivery returns HTTP 502
 
@@ -113,6 +119,7 @@ Callers should therefore use:
 - `status code` to detect total failure vs at-least-some delivery
 - `ok` to detect full success vs partial success
 - `sent_to` / `request_ids` to know exactly which peers were reached
+- `results` to inspect the per-peer handoff stage or send failure reason
 
 ## 7. What Bridges does not currently promise
 
@@ -120,7 +127,7 @@ Bridges does **not** currently promise:
 - exactly-once delivery
 - at-least-once delivery after remote runtime processing
 - end-to-end acknowledgements for `broadcast` / `publish`
-- a general retry/backoff policy beyond the current small `ask` retry
+- a general retry/backoff policy beyond the current small `ask` / `debate` retries
 - delivery deduplication across all message classes
 - causal or total ordering across peers
 

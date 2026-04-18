@@ -2019,6 +2019,35 @@ enum PolledOutcome {
     Failure { from: Option<String>, error: String },
 }
 
+fn print_fanout_results(label: &str, val: &serde_json::Value) {
+    let Some(results) = val["results"].as_array() else {
+        return;
+    };
+    if results.is_empty() {
+        return;
+    }
+
+    eprintln!("{} delivery results:", label);
+    for result in results {
+        let peer_id = result["peer_id"].as_str().unwrap_or("?");
+        let delivered = result["delivered"].as_bool().unwrap_or(false);
+        let stage = result["stage"].as_str().unwrap_or("unknown");
+        let request_id = result["request_id"].as_str();
+        let error = result["error"].as_str();
+        if delivered {
+            if let Some(request_id) = request_id {
+                eprintln!("  [ok] {} — {} ({})", peer_id, stage, request_id);
+            } else {
+                eprintln!("  [ok] {} — {}", peer_id, stage);
+            }
+        } else if let Some(error) = error {
+            eprintln!("  [err] {} — {}: {}", peer_id, stage, error);
+        } else {
+            eprintln!("  [err] {} — {}", peer_id, stage);
+        }
+    }
+}
+
 /// Poll the daemon for a staged delivery outcome by request_id. Blocks until terminal outcome or timeout.
 fn poll_response(request_id: &str, timeout_secs: u64) -> Option<PolledOutcome> {
     let client = reqwest::blocking::Client::builder()
@@ -2251,11 +2280,16 @@ pub fn cmd_debate(topic: &str, project_id: &str, new_session: bool) {
             std::process::exit(1);
         }
     };
-    if !resp.status().is_success() {
-        eprintln!("Debate failed: HTTP {}", resp.status());
+    let status = resp.status();
+    let val: serde_json::Value = parse_json_or_exit(resp);
+    print_fanout_results("Debate", &val);
+    if !status.is_success() {
+        eprintln!(
+            "Debate failed: {}",
+            val["error"].as_str().unwrap_or("unknown error")
+        );
         std::process::exit(1);
     }
-    let val: serde_json::Value = parse_json_or_exit(resp);
     let sent_to = val["sent_to"].as_array().map(|a| a.len()).unwrap_or(0);
     if sent_to == 0 {
         println!("No members to debate with");
@@ -2316,12 +2350,20 @@ pub fn cmd_broadcast(message: &str, project_id: &str) {
             std::process::exit(1);
         }
     };
-    if !resp.status().is_success() {
-        eprintln!("Broadcast failed: HTTP {}", resp.status());
+    let status = resp.status();
+    let val: serde_json::Value = parse_json_or_exit(resp);
+    print_fanout_results("Broadcast", &val);
+    let targets = val["sent_to"].as_array().map(|a| a.len()).unwrap_or(0);
+    if !status.is_success() {
+        eprintln!(
+            "Broadcast failed: {}",
+            val["error"].as_str().unwrap_or("unknown error")
+        );
         std::process::exit(1);
     }
-    let val: serde_json::Value = parse_json_or_exit(resp);
-    let targets = val["sent_to"].as_array().map(|a| a.len()).unwrap_or(0);
+    if val["ok"].as_bool() == Some(false) {
+        eprintln!("Broadcast completed with partial delivery.");
+    }
     println!("Broadcast sent to {} members (E2E encrypted)", targets);
 }
 
@@ -2352,9 +2394,18 @@ pub fn cmd_publish(file: &str, project_id: &str) {
             std::process::exit(1);
         }
     };
-    if !resp.status().is_success() {
-        eprintln!("Publish failed: HTTP {}", resp.status());
+    let status = resp.status();
+    let val: serde_json::Value = parse_json_or_exit(resp);
+    print_fanout_results("Publish", &val);
+    if !status.is_success() {
+        eprintln!(
+            "Publish failed: {}",
+            val["error"].as_str().unwrap_or("unknown error")
+        );
         std::process::exit(1);
+    }
+    if val["ok"].as_bool() == Some(false) {
+        eprintln!("Publish completed with partial delivery.");
     }
     println!(
         "Published {} to project {} (E2E encrypted)",
